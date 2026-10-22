@@ -1,7 +1,7 @@
 {
   "name": "dsh-model-http-proxy",
   "description": "模型代理：按模型/提供方精准路由模型 API 请求走代理或直连，其余请求不受影响（Route model-API traffic per provider; everything else stays direct）",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "repository": {
     "type": "git",
