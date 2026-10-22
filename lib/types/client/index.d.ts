@@ -1,20 +1,23 @@
 /**
- * Client half of dsh-model-http-proxy: registers the `model-proxy` settings tab in
- * the DSH Settings → Plugins section. The Host half (src/index.ts) owns the
- * same `model-proxy` namespace; the tab pairs the two without learning what the
+ * Client half of dsh-model-http-proxy: registers the `Model Http Proxy` page
+ * in the DSH Settings left navigation (settings.section list slot — the same
+ * form mindmap's 思维脑图 entry uses). The Host half (src/index.ts) owns the
+ * `model-proxy` namespace; the page pairs the two without learning what the
  * namespace means.
  *
- * 0.1.7 migration: the `settingsScope` service was removed upstream and this
- * module's inject of it left the browser fiber pending forever ("waiting for
- * service: settingsScope"), blocking the whole Web boot. The replacement face
- * is the settings provider's shared `configForms` service: one
- * `ConfigForm<T>` per namespace with getSnapshot/subscribe/set/unset.
+ * UI history: v0.1 registered a `settings.plugins.tab` inside the 内置插件
+ * section; per author preference the entry now lives as a first-class left-nav
+ * page via `settings.section` (kind list / scope root, options id/order/label).
+ *
+ * 0.1.7 migration note: the `settingsScope` service was removed upstream; this
+ * module reads/writes through the settings provider's shared `configForms`
+ * service (one ConfigForm<T> per namespace) instead.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis';
 /** Required services (cordis fiber inject). */
 export declare const inject: string[];
 /**
- * Mount the model-proxy settings tab.
+ * Mount the Model Http Proxy settings page.
  * @param ctx - the browser plugin context.
  */
 export declare function apply(ctx: ClientContext): void;

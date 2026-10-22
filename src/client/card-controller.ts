@@ -64,8 +64,8 @@ export interface HttpProxyCardState {
 
 /** The registration-side face the tab's slot entry renders. */
 export interface HttpProxyCardFace {
-  /** Tab snapshot bound by the renderer as useHttpProxyCard. */
-  hooks: { httpProxyCard: SnapshotStore<HttpProxyCardState> }
+  /** Page snapshot bound by the renderer as useModelProxyCard. */
+  hooks: { modelProxyCard: SnapshotStore<HttpProxyCardState> }
   /** Stage draft text for one field. */
   edit: (field: FieldName, text: string) => void
   /** Write every staged edit. */
@@ -171,7 +171,7 @@ export class HttpProxyCardController {
   /** Build the face the card's slot registration injects. */
   inject(): HttpProxyCardFace {
     return {
-      hooks: { httpProxyCard: this.store },
+      hooks: { modelProxyCard: this.store },
       edit: (field, text) => {
         this.staged.set(field, text)
         this.failed = false

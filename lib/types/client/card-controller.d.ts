@@ -52,9 +52,9 @@ export interface HttpProxyCardState {
 }
 /** The registration-side face the tab's slot entry renders. */
 export interface HttpProxyCardFace {
-    /** Tab snapshot bound by the renderer as useHttpProxyCard. */
+    /** Page snapshot bound by the renderer as useModelProxyCard. */
     hooks: {
-        httpProxyCard: SnapshotStore<HttpProxyCardState>;
+        modelProxyCard: SnapshotStore<HttpProxyCardState>;
     };
     /** Stage draft text for one field. */
     edit: (field: FieldName, text: string) => void;

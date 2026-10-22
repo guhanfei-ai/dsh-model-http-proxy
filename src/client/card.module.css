@@ -290,3 +290,17 @@
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 1px;
 }
+
+/* settings.section 左栏独立页形态（v0.1.2）：无折叠卡壳，字段直接铺开 */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pageIntro {
+  margin: 0 0 12px;
+  opacity: 0.75;
+  font-size: 13px;
+  line-height: 1.5;
+}
