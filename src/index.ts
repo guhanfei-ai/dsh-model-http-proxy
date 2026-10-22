@@ -56,6 +56,43 @@ interface PiAiSection {
   providers?: Record<string, { baseURL?: string }>
 }
 
+/** A settings-service describe row (the host shape; `value` is the live config). */
+interface SettingsRow {
+  ns: string
+  value?: unknown
+}
+
+/**
+ * Read this plugin's own `model-proxy` section from the settings service.
+ *
+ * The fiber config handed to `apply` is the mount-time snapshot: a settings
+ * save either restarts the entry (fresh config) or patches the running one in
+ * place, and only the settings service knows which value is current. Reading it
+ * per refresh makes routing follow a save even on hosts that patch in place,
+ * which is what the page promises ("保存后下一次请求即生效").
+ * @param ctx - the Cordis context, for the optional settings service.
+ * @returns the live section values, or undefined when the service has no row.
+ */
+function liveConfigOf(ctx: Context): PluginConfig | undefined {
+  let row: SettingsRow | undefined
+  try {
+    const settings = ctx.get('settings') as SettingsLike | undefined
+    row = settings?.describe?.().find(entry => entry.ns === name)
+  } catch {
+    return undefined
+  }
+  const value = row?.value
+  if (value === null || typeof value !== 'object') return undefined
+  const section = value as { proxy?: unknown; proxyHosts?: unknown; excludeHosts?: unknown }
+  const listOf = (input: unknown): string[] =>
+    Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : []
+  return {
+    proxy: typeof section.proxy === 'string' ? section.proxy : '',
+    proxyHosts: listOf(section.proxyHosts),
+    excludeHosts: listOf(section.excludeHosts),
+  }
+}
+
 /** Read the `llm-pi-ai` section from the settings service, tolerating absence. */
 function piAiSectionOf(ctx: Context): PiAiSection | undefined {
   try {
@@ -162,7 +199,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   const refresh = (): void => {
     if (disposed) return
-    const cfg = current()
+    // The settings document is authoritative once the service is present: it
+    // carries the value a save just wrote, whichever way the loader delivers it.
+    const cfg = liveConfigOf(ctx) ?? current()
     // Settings `proxy` wins; the `DSH_HTTP_PROXY` environment variable is the
     // no-file fallback so a deployment can set the proxy without editing settings.
     const proxyUrl = cfg.proxy.length > 0 ? cfg.proxy : (process.env.DSH_HTTP_PROXY ?? '')
@@ -213,7 +252,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // 0.1.7 renamed the broadcast to `settings/document-updated` (payload: the
   // entry id whose section moved); `settings/updated` no longer fires there.
   ctx.on('settings/document-updated', (ns: unknown) => {
-    if (String(ns) === PI_AI_NS) refresh()
+    const id = String(ns)
+    // Our own section decides the proxy URL and both host lists; `llm-pi-ai`
+    // decides the auto-detected gateways the host set is built from.
+    if (id === name || id === PI_AI_NS) refresh()
   })
 
   // 0.1.7 discovery: the loader reads the plugin's flat `Config` export as the

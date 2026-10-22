@@ -65,6 +65,86 @@ export const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[] = [
 ]
 
 /**
+ * The endpoint each pi-ai catalog route uses when its profile names no
+ * `baseURL` of its own. Mirrors `builtinProviders()` of the installed catalog
+ * (pi-ai 1.3.0); routes whose endpoint is built per request (Bedrock, Azure,
+ * Vertex, the Cloudflare gateways, opencode, typesafe) carry no entry and
+ * resolve to nothing here — a configured profile of that kind simply does not
+ * contribute a suggestion.
+ *
+ * The settings page reads this to show the hosts of the providers that are
+ * actually configured: a catalog route such as `kimi-coding` names no
+ * `baseURL`, so without this table its endpoint would be unknowable in the
+ * browser (the catalog itself is a Host-only dependency).
+ */
+export const PROVIDER_ENDPOINTS: Readonly<Record<string, string>> = {
+  'ant-ling': 'https://api.ant-ling.com/v1',
+  anthropic: 'https://api.anthropic.com',
+  baseten: 'https://inference.baseten.co/v1',
+  cerebras: 'https://api.cerebras.ai/v1',
+  deepseek: 'https://api.deepseek.com',
+  // The two official DeepSeek adapters (API key and signed-in account) share
+  // the official host; `agent-default-model` names the first as the default.
+  'deepseek-official': 'https://api.deepseek.com',
+  'deepseek-account': 'https://api.deepseek.com',
+  fireworks: 'https://api.fireworks.ai/inference',
+  'github-copilot': 'https://api.individual.githubcopilot.com',
+  google: 'https://generativelanguage.googleapis.com/v1beta',
+  groq: 'https://api.groq.com/openai/v1',
+  huggingface: 'https://router.huggingface.co/v1',
+  'kimi-coding': 'https://api.kimi.com/coding/v1',
+  meta: 'https://api.meta.ai/v1',
+  minimax: 'https://api.minimax.io/anthropic',
+  'minimax-cn': 'https://api.minimaxi.com/anthropic',
+  mistral: 'https://api.mistral.ai',
+  moonshotai: 'https://api.moonshot.ai/v1',
+  'moonshotai-cn': 'https://api.moonshot.cn/v1',
+  nvidia: 'https://integrate.api.nvidia.com/v1',
+  openai: 'https://api.openai.com/v1',
+  'openai-codex': 'https://chatgpt.com/backend-api',
+  openrouter: 'https://openrouter.ai/api/v1',
+  'qwen-token-plan': 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  'qwen-token-plan-cn': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  'qwen-token-plan-individual': 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  together: 'https://api.together.ai/v1',
+  'vercel-ai-gateway': 'https://ai-gateway.vercel.sh',
+  xai: 'https://api.x.ai/v1',
+  xiaomi: 'https://api.xiaomimimo.com/v1',
+  'xiaomi-token-plan-ams': 'https://token-plan-ams.xiaomimimo.com/v1',
+  'xiaomi-token-plan-cn': 'https://token-plan-cn.xiaomimimo.com/v1',
+  'xiaomi-token-plan-sgp': 'https://token-plan-sgp.xiaomimimo.com/v1',
+  zai: 'https://api.z.ai/api/coding/paas/v4',
+  'zai-coding-cn': 'https://open.bigmodel.cn/api/coding/paas/v4',
+}
+
+/**
+ * Resolve one configured pi-ai provider profile to the host its requests land
+ * on: the profile's own `baseURL` when it sets one (custom gateways such as
+ * `azapi` do), else the catalog endpoint of that route, else nothing.
+ * @param route - the provider key in the `llm-pi-ai` settings document.
+ * @param baseURL - that profile's `baseURL`, if it sets one.
+ * @returns the bare lowercase hostname, or undefined when it cannot be known.
+ */
+export function providerEndpointHost(route: string, baseURL?: unknown): string | undefined {
+  if (typeof baseURL === 'string' && baseURL.length > 0) {
+    try {
+      return hostnameOf(baseURL)
+    } catch {
+      // A malformed baseURL drops out of the suggestions; the Host half is
+      // where such a configuration error actually surfaces.
+      return undefined
+    }
+  }
+  const endpoint = PROVIDER_ENDPOINTS[route]
+  if (endpoint === undefined) return undefined
+  try {
+    return hostnameOf(endpoint)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Extract the hostname from an absolute URL string or `URL`.
  * @param value - the URL to read.
  * @returns the lowercase hostname.

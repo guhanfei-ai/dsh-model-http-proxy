@@ -25,6 +25,29 @@ export declare const DEFAULT_MODEL_HOSTS: readonly string[];
  */
 export declare const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[];
 /**
+ * The endpoint each pi-ai catalog route uses when its profile names no
+ * `baseURL` of its own. Mirrors `builtinProviders()` of the installed catalog
+ * (pi-ai 1.3.0); routes whose endpoint is built per request (Bedrock, Azure,
+ * Vertex, the Cloudflare gateways, opencode, typesafe) carry no entry and
+ * resolve to nothing here — a configured profile of that kind simply does not
+ * contribute a suggestion.
+ *
+ * The settings page reads this to show the hosts of the providers that are
+ * actually configured: a catalog route such as `kimi-coding` names no
+ * `baseURL`, so without this table its endpoint would be unknowable in the
+ * browser (the catalog itself is a Host-only dependency).
+ */
+export declare const PROVIDER_ENDPOINTS: Readonly<Record<string, string>>;
+/**
+ * Resolve one configured pi-ai provider profile to the host its requests land
+ * on: the profile's own `baseURL` when it sets one (custom gateways such as
+ * `azapi` do), else the catalog endpoint of that route, else nothing.
+ * @param route - the provider key in the `llm-pi-ai` settings document.
+ * @param baseURL - that profile's `baseURL`, if it sets one.
+ * @returns the bare lowercase hostname, or undefined when it cannot be known.
+ */
+export declare function providerEndpointHost(route: string, baseURL?: unknown): string | undefined;
+/**
  * Extract the hostname from an absolute URL string or `URL`.
  * @param value - the URL to read.
  * @returns the lowercase hostname.

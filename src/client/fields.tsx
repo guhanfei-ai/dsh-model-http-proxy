@@ -5,9 +5,39 @@
 
 import { useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { HostSuggestion } from './settings-io.js'
 import { normalizeHostEntry } from '../hosts.js'
 import css from './card.module.css'
+
+/**
+ * The dropdown chevron, drawn locally instead of imported from the host's
+ * primitives module. The icon's export name is not stable across host
+ * releases (`IconChevronDownOutline14` on 0.1.x, `IconChevronDownOutlineRegular`
+ * on 0.2.x), and requiring the missing name yields `undefined` — which React
+ * rejects as an invalid element type (#130) and takes the whole slot entry
+ * down with it, leaving the settings page blank. A local SVG has no
+ * cross-version surface and keeps the bundle self-contained.
+ */
+function ChevronDown(props: { className?: string | undefined }) {
+  return (
+    <svg
+      className={props.className}
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 6.25 8 10.25 12 6.25"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
 
 export function ValueField(props: {
   id: string
@@ -38,59 +68,65 @@ export function ValueField(props: {
 }
 
 /**
- * A hostname field that doubles as a combobox: it stays free text, but focus
- * (or a chevron) opens a dropdown of known model hostnames to pick from,
- * styled like the host's own menus rather than a browser dialog. Arrow keys
- * move the highlight, Enter picks, Escape closes.
+ * A hostname field that behaves like the host's own tag inputs: every
+ * committed host is drawn as a removable chip, and the text cursor lives in a
+ * bare input at the end of the row. Focus (or the chevron) opens a dropdown of
+ * the providers that are actually configured. Enter or a comma commits what is
+ * typed, Backspace on an empty entry drops the last chip, Arrow keys move the
+ * highlight, Enter picks a suggestion, Escape closes the list.
+ *
+ * The chips are the value: `value` is the parsed host list and `onChange`
+ * always hands back a whole new list, so the page never has to split text.
  */
 export function HostField(props: {
   id: string
   label: string
   hint: string
   placeholder: string
-  value: string
-  suggestions: string[]
+  value: string[]
+  suggestions: HostSuggestion[]
   disabled: boolean
-  onEdit: (text: string) => void
+  onChange: (next: string[]) => void
 }) {
+  const [pending, setPending] = useState('')
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState(0)
   // Already-committed hostnames, normalized the same way the Host half routes,
   // so a casing/port/URL variant of a saved host never shows as "new".
   const present = new Set(
-    props.value.split(/[,\s]+/).map(token => normalizeHostEntry(token)).filter((h): h is string => h !== undefined),
+    props.value.map(host => normalizeHostEntry(host)).filter((host): host is string => host !== undefined),
   )
-  // The token being typed right now: whatever follows the last separator.
-  const tail = /[^,\s]*$/.exec(props.value)?.[0] ?? ''
-  const options = props.suggestions.filter(host =>
-    !present.has(host)
-    && (tail === '' || host.includes(tail.toLowerCase())),
+  const query = pending.trim().toLowerCase()
+  // Match the host, and also the provider name behind it, so typing "codex"
+  // finds chatgpt.com and typing "kimi" finds api.kimi.com.
+  const options = props.suggestions.filter(option =>
+    !present.has(option.host)
+    && (query === ''
+      || option.host.includes(query)
+      || option.providers.some(name => name.toLowerCase().includes(query))),
   )
   const active = open && highlight >= 0 && highlight < options.length ? highlight : -1
 
-  const add = (host: string): void => {
+  /** Commit one or more hosts, de-duplicated against what is already selected. */
+  const commit = (text: string): void => {
     if (props.disabled) return
-    const parts = props.value.trim() === '' ? [] : props.value.trim().split(/[,\s]+/).filter(Boolean)
-    // The text ends right after a separator: every token is committed and
-    // nothing is being typed, so the pick always appends — a committed custom
-    // host is never clobbered.
-    const hasDraft = !/[,\s]$/.test(props.value)
-    const last = parts[parts.length - 1]
-    const committed = new Set<string>()
-    for (const token of [...props.suggestions, ...parts.slice(0, -1)]) {
-      const normalized = normalizeHostEntry(token)
-      if (normalized !== undefined) committed.add(normalized)
+    const parts = text.split(/[,，\s]+/).map(part => part.trim()).filter(part => part.length > 0)
+    if (parts.length === 0) return
+    const next = [...props.value]
+    for (const part of parts) {
+      const normalized = normalizeHostEntry(part)
+      if (normalized === undefined) continue
+      if (next.some(existing => normalizeHostEntry(existing) === normalized)) continue
+      next.push(part)
     }
-    const draft = hasDraft && last !== undefined && !committed.has(normalizeHostEntry(last) ?? '')
-      ? last
-      : undefined
-    const base = draft === undefined ? parts : parts.slice(0, -1)
-    if (!base.some(token => normalizeHostEntry(token) === host)) {
-      props.onEdit(base.length === 0 ? host : `${base.join(', ')}${', '}${host}`)
-    }
-    // Keep the panel open so several hosts can be picked in a row; the
-    // just-picked host leaves `options` on the next render.
-    setHighlight(0)
+    setPending('')
+    if (next.length !== props.value.length) props.onChange(next)
+  }
+
+  /** Drop the chip at one index; the rest of the list keeps its order. */
+  const remove = (index: number): void => {
+    if (props.disabled) return
+    props.onChange(props.value.filter((_, position) => position !== index))
   }
 
   const move = (delta: number): void => {
@@ -100,6 +136,25 @@ export function HostField(props: {
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
     if (event.key === 'Escape') { setOpen(false); return }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (open && options.length > 0 && pending.trim() === '') {
+        const pick = options[active >= 0 ? active : 0]
+        if (pick !== undefined) commit(pick.host)
+        return
+      }
+      if (open && options.length > 0 && active >= 0) {
+        const pick = options[active]
+        if (pick !== undefined) { commit(pick.host); return }
+      }
+      commit(pending)
+      return
+    }
+    if (event.key === 'Backspace' && pending === '' && props.value.length > 0) {
+      event.preventDefault()
+      remove(props.value.length - 1)
+      return
+    }
     if (event.key === 'ArrowDown') {
       event.preventDefault()
       if (!open) { setOpen(true); setHighlight(0); return }
@@ -110,12 +165,6 @@ export function HostField(props: {
       event.preventDefault()
       if (!open) { setOpen(true); setHighlight(options.length - 1); return }
       move(-1)
-      return
-    }
-    if (event.key === 'Enter' && open && options.length > 0) {
-      event.preventDefault()
-      const pick = options[active >= 0 ? active : 0]
-      if (pick !== undefined) add(pick)
       return
     }
     if (event.key === 'Home' && open) { event.preventDefault(); setHighlight(0); return }
@@ -130,25 +179,62 @@ export function HostField(props: {
       <div
         className={css.combo}
         onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false)
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+          setOpen(false)
+          // A host typed but not confirmed still lands: a blur is a commit.
+          commit(pending)
         }}
       >
-        <input
-          id={props.id}
-          className={`${css.input} ${css.comboInput}`}
-          type="text"
-          role="combobox"
-          aria-expanded={open}
-          aria-controls={`${props.id}-list`}
-          aria-autocomplete="list"
-          aria-activedescendant={active >= 0 ? `${props.id}-opt-${active}` : undefined}
-          value={props.value}
-          placeholder={props.placeholder}
-          disabled={props.disabled}
-          onFocus={() => { setOpen(true); setHighlight(0) }}
-          onChange={(event) => { props.onEdit(event.target.value); setOpen(true); setHighlight(0) }}
-          onKeyDown={onKeyDown}
-        />
+        <div className={css.comboBox}>
+          {props.value.map((host, index) => (
+            <span className={css.chip} key={`${host}-${index}`}>
+              <span className={css.chipLabel}>{host}</span>
+              <button
+                type="button"
+                className={css.chipRemove}
+                aria-label={`不再代理 ${host}`}
+                disabled={props.disabled}
+                onMouseDown={(event) => { event.preventDefault() }}
+                onClick={() => { remove(index) }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                  <path d="M2 2 8 8M8 2 2 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
+              </button>
+            </span>
+          ))}
+          <input
+            id={props.id}
+            className={css.comboEntry}
+            type="text"
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={`${props.id}-list`}
+            aria-autocomplete="list"
+            aria-activedescendant={active >= 0 ? `${props.id}-opt-${active}` : undefined}
+            value={pending}
+            placeholder={props.value.length === 0 ? props.placeholder : ''}
+            disabled={props.disabled}
+            onFocus={() => { setOpen(true); setHighlight(0) }}
+            onChange={(event) => {
+              const text = event.target.value
+              // A comma finishes the entry being typed, exactly like the host's
+              // own tag inputs; the remainder stays editable.
+              if (/[,，]/.test(text)) {
+                const parts = text.split(/[,，]/)
+                commit(parts.slice(0, -1).join(','))
+                setPending(parts[parts.length - 1] ?? '')
+                setOpen(true)
+                setHighlight(0)
+                return
+              }
+              setPending(text)
+              setOpen(true)
+              setHighlight(0)
+            }}
+            onKeyDown={onKeyDown}
+          />
+        </div>
         <button
           type="button"
           className={css.comboChevron}
@@ -163,15 +249,15 @@ export function HostField(props: {
             if (next) setHighlight(0)
           }}
         >
-          <IconChevronDownOutline14 className={open ? css.comboChevronOpen : undefined} />
+          <ChevronDown className={open ? css.comboChevronOpen : undefined} />
         </button>
         {open
           ? (
             <ul className={css.comboList} id={`${props.id}-list`} role="listbox">
               {options.length > 0
-                ? options.map((host, index) => (
+                ? options.map((option, index) => (
                   <li
-                    key={host}
+                    key={option.host}
                     role="option"
                     id={`${props.id}-opt-${index}`}
                     aria-selected={index === active}
@@ -181,13 +267,16 @@ export function HostField(props: {
                       type="button"
                       className={css.comboItem}
                       onMouseDown={(event) => { event.preventDefault() }}
-                      onClick={() => { add(host) }}
+                      onClick={() => { commit(option.host) }}
                     >
-                      {host}
+                      <span className={css.comboItemHost}>{option.host}</span>
+                      {option.providers.length > 0
+                        ? <span className={css.comboItemProvider}>{option.providers.join(' · ')}</span>
+                        : null}
                     </button>
                   </li>
                 ))
-                : <li className={css.comboEmpty}>无更多可选域名</li>}
+                : <li className={css.comboEmpty}>没有可选的域名</li>}
             </ul>
           )
           : null}
