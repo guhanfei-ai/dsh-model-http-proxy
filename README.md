@@ -8,7 +8,7 @@
 >
 > **只覆盖 HTTP `fetch`。** WebSocket 传输不经过 `globalThis.fetch`，因此不受本插件控制。
 
-> **状态**：当前源码已加入全局直连与多代理卡片，尚未发布新版本（包版本仍为 v0.1.2）。设置页在 DSH 左栏「设置 → M-H-Proxy」，域名以可编辑列表管理；下拉候选来自**聊天框当前可选的模型**（`session.modelCatalog` 的可路由 provider），并逐行标注来源。
+> **状态**：v0.1.3 已发布，包含全局直连与多代理卡片。设置页在 DSH 左栏「设置 → M-H-Proxy」，域名以可编辑列表管理；下拉候选来自**聊天框当前可选的模型**（`session.modelCatalog` 的可路由 provider），并逐行标注来源。
 
 ## 功能
 
