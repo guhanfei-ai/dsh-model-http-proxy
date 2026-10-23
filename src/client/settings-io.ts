@@ -19,9 +19,13 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import { routingFieldsOf } from '../routes.js'
+import type { RoutingFields } from '../routes.js'
+import { configProblem } from '../validate.js'
 import {
   DEFAULT_DEEPSEEK_HOST,
-  BUILTIN_PROXY_HOSTS,
+  BUILTIN_DIRECT_HOSTS,
+  BUILTIN_PROXY_GROUPS,
   addHostEntries,
   normalizeHostEntry,
   overlappingHosts,
@@ -45,6 +49,8 @@ interface NamespaceRow {
   ns?: string
   value?: unknown
   revision?: unknown
+  /** Host describe exposes only fields that are editable live. */
+  schema?: unknown
 }
 
 /** Structural shape of the remote.settings facade this page consumes. */
@@ -73,14 +79,51 @@ interface SettingsApi {
   settings: RemoteSettingsLike & Partial<ConnectionSettingsLike>
 }
 
-/** The `model-proxy` fields this page edits (mirror of the Host Config). */
-export interface ProxyFields {
-  /** Proxy URL (http/https/socks5/socks5h); empty = inactive. */
-  proxy: string
-  /** Hostnames to proxy (empty = auto-detect every model host). */
-  proxyHosts: string[]
-  /** Hostnames never proxied. */
-  excludeHosts: string[]
+/** The complete editable routing document; legacy fields are read-only migration input. */
+export type ProxyFields = RoutingFields
+
+/** Never let a draft mutate the last successfully read/saved snapshot. */
+export function cloneProxyFields(fields: ProxyFields): ProxyFields {
+  return {
+    proxies: fields.proxies.map(entry => ({ ...entry, proxyHosts: [...entry.proxyHosts] })),
+    excludeHosts: [...fields.excludeHosts],
+  }
+}
+
+function sameHosts(left: readonly string[], right: readonly string[]): boolean {
+  const sorted = [...right].sort()
+  return left.length === right.length && [...left].sort().every((host, index) => host === sorted[index])
+}
+
+/** Card order and rule order have no routing meaning. */
+export function sameProxyFields(left: ProxyFields, right: ProxyFields): boolean {
+  return sameHosts(left.excludeHosts, right.excludeHosts) && sameProxies(left, right)
+}
+
+function sameProxies(left: ProxyFields, right: ProxyFields): boolean {
+  return left.proxies.length === right.proxies.length && left.proxies.every(entry => {
+    const other = right.proxies.find(candidate => candidate.id === entry.id)
+    return other !== undefined && entry.name === other.name && entry.enabled === other.enabled
+      && entry.proxy === other.proxy && sameHosts(entry.proxyHosts, other.proxyHosts)
+  })
+}
+
+/** Three-way rebase: retain local edits and require confirmation for real conflicts. */
+export function rebaseRoutingFields(base: ProxyFields, draft: ProxyFields, latest: ProxyFields): {
+  fields: ProxyFields
+  conflicts: (keyof ProxyFields)[]
+} {
+  const fields = cloneProxyFields(latest)
+  const conflicts: (keyof ProxyFields)[] = []
+  const same = (key: keyof ProxyFields, a: ProxyFields, b: ProxyFields): boolean =>
+    key === 'proxies' ? sameProxies(a, b) : sameHosts(a.excludeHosts, b.excludeHosts)
+  for (const key of ['proxies', 'excludeHosts'] as const) {
+    if (same(key, base, draft)) continue
+    if (!same(key, base, latest) && !same(key, draft, latest)) conflicts.push(key)
+    if (key === 'proxies') fields.proxies = cloneProxyFields(draft).proxies
+    else fields.excludeHosts = [...draft.excludeHosts]
+  }
+  return { fields, conflicts }
 }
 
 /** What `read()` hands the page: the live fields plus immediately available suggestions. */
@@ -95,7 +138,7 @@ export interface ProxyFace {
   read(): Promise<ProxySnapshot | null>
   /** Enrich suggestions asynchronously; catalog failures time out to labelled fallbacks. */
   refreshSuggestions(fields: ProxyFields): Promise<HostSuggestion[]>
-  /** Write all three fields in one mutate transaction; throws when the write fails. */
+  /** Save every card and global exclusion in one transaction; clear obsolete legacy fields. */
   save(fields: ProxyFields): Promise<void>
 }
 
@@ -151,6 +194,32 @@ function unwrapWrite(res: unknown, what: string): void {
   if (res && typeof res === 'object' && (res as { ok?: unknown }).ok === true) return
   const error = (res as { error?: { message?: string; code?: string } } | null)?.error
   throw Object.assign(new Error(error?.message ?? `${what} failed`), { code: error?.code })
+}
+
+const BACKEND_RELOAD_CODE = 'MODEL_PROXY_BACKEND_RELOAD_REQUIRED'
+const BACKEND_RELOAD_MESSAGE = '运行中的 M-H-Proxy 后端尚未加载新版多代理配置。请先重载后端插件；若不支持热重载，请重启 DSH，再点击「重新读取并保留草稿」。仅刷新网页无效，本次未保存。'
+
+function backendReloadError(): Error & { code: string } {
+  return Object.assign(new Error(BACKEND_RELOAD_MESSAGE), { code: BACKEND_RELOAD_CODE })
+}
+
+/** The host's form schema is already filtered to volatile fields; no flag remains. */
+function lacksProxyField(schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false
+  const form = schema as { type?: unknown; dict?: unknown }
+  if (form.type !== 'object' || !form.dict || typeof form.dict !== 'object' || Array.isArray(form.dict)) return false
+  return !Object.hasOwn(form.dict, 'proxies')
+}
+
+/** A frontend refresh cannot replace an already imported Host Config schema. */
+export function isBackendReloadRequired(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === BACKEND_RELOAD_CODE
+}
+
+function readableWriteError(error: unknown): unknown {
+  const message = String((error as { message?: unknown } | null)?.message ?? error)
+  return /^(?:Error:\s*)?Config field ["']proxies["'] is not volatile\.?$/iu.test(message)
+    ? backendReloadError() : error
 }
 
 /** A conflict is recoverable by rereading the latest revision, not blindly retrying. */
@@ -220,12 +289,14 @@ function suggestionsOf(fields: ProxyFields, piAiValue: unknown, catalog: Provide
   }
   // Author-supplied hosts are selectable even when they are not model API endpoints.
   // This is a candidate list only, never an implicit routing union.
-  for (const host of BUILTIN_PROXY_HOSTS) {
-    if (!byHost.has(host)) byHost.set(host, { host, kind: 'builtin', providers: ['作者内置'] })
+  for (const group of [{ name: 'DeepSeek', hosts: BUILTIN_DIRECT_HOSTS }, ...BUILTIN_PROXY_GROUPS]) {
+    for (const host of group.hosts) {
+      if (!byHost.has(host)) byHost.set(host, { host, kind: 'builtin', providers: [group.name] })
+    }
   }
   // The settings snapshot, not the live chips, owns these suggestions. A saved
   // custom host must reappear after its chip is removed, even after catalog refresh.
-  for (const entry of [...fields.proxyHosts, ...fields.excludeHosts]) {
+  for (const entry of [...fields.proxies.flatMap(proxy => proxy.proxyHosts), ...fields.excludeHosts]) {
     const host = normalizeHostEntry(entry)
     if (host !== undefined && !byHost.has(host)) byHost.set(host, { host, kind: 'saved', providers: [] })
   }
@@ -277,15 +348,9 @@ async function boundedProviderCatalogOf(ctx: ClientContext): Promise<ProviderCat
   }
 }
 
-/** Coerce a namespace value into the page's fields, defaulting absent members. */
+/** Migrate only in memory; merely opening this page never changes saved settings. */
 function fieldsOf(value: unknown): ProxyFields {
-  const row = (value && typeof value === 'object' ? value : {}) as { proxy?: unknown; proxyHosts?: unknown; excludeHosts?: unknown }
-  const listOf = (input: unknown): string[] => (Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : [])
-  return {
-    proxy: typeof row.proxy === 'string' ? row.proxy : '',
-    proxyHosts: row.proxyHosts === undefined ? [...BUILTIN_PROXY_HOSTS] : listOf(row.proxyHosts),
-    excludeHosts: listOf(row.excludeHosts),
-  }
+  return routingFieldsOf(value)
 }
 
 /**
@@ -297,6 +362,7 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
   // Revision read by the last successful describe, replayed on save as the
   // optimistic-concurrency check so a stale page cannot overwrite a newer one.
   let describedRevision: number | null = null
+  let backendMissingProxies = false
   let piAiValue: unknown
   return {
     async read(): Promise<ProxySnapshot | null> {
@@ -308,9 +374,10 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
       const rows = settingsNamespacesOf(res)
       const own = rows.find(row => row?.ns === NS)
       if (!own) return null
+      const fields = fieldsOf(own.value)
       const revision = own.revision
       describedRevision = typeof revision === 'number' && Number.isInteger(revision) ? revision : null
-      const fields = fieldsOf(own.value)
+      backendMissingProxies = lacksProxyField(own.schema)
       piAiValue = rows.find(row => row?.ns === PI_AI_NS)?.value
       // Render the actual settings immediately. Fallback rows are labelled as
       // unverified until refreshSuggestions resolves the chat model catalog.
@@ -321,20 +388,29 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
       return suggestionsOf(fields, piAiValue, catalog)
     },
     async save(fields: ProxyFields): Promise<void> {
+      const problem = configProblem(fields)
+      if (problem !== null) throw new Error(problem)
       const api = settingsApiOf(ctx)
       if (!api) throw new Error('settings service unavailable')
+      if (backendMissingProxies) throw backendReloadError()
       if (api.kind === 'remote') {
         if (typeof api.settings.mutate !== 'function') throw new Error('settings.mutate unavailable')
-        // Whole-path set ops: arrays replace wholesale (no index-wise merge);
-        // the three ops land in one host-side write transaction. The third
-        // argument is arity-required: pass undefined, not fewer arguments.
+        // Whole-path sets replace arrays atomically. Clear legacy values in the
+        // same transaction, so deleting the last card cannot revive an old proxy.
+        // The third argument is arity-required even when its value is undefined.
         const ops: MutateOp[] = [
-          { op: 'set', path: ['proxy'], value: fields.proxy },
-          { op: 'set', path: ['proxyHosts'], value: fields.proxyHosts },
+          { op: 'set', path: ['proxies'], value: fields.proxies },
           { op: 'set', path: ['excludeHosts'], value: fields.excludeHosts },
+          { op: 'set', path: ['proxy'], value: '' },
+          { op: 'set', path: ['proxyHosts'], value: [] },
         ]
-        const written = await api.settings.mutate(NS, ops, describedRevision ?? undefined)
-        unwrapWrite(written, 'settings.mutate')
+        let written: unknown
+        try {
+          written = await api.settings.mutate(NS, ops, describedRevision ?? undefined)
+          unwrapWrite(written, 'settings.mutate')
+        } catch (err) {
+          throw readableWriteError(err)
+        }
         // Adopt the revision this write produced: the host rejects a save whose
         // expectation is stale, so a page that saved once would otherwise fail
         // every later save with `settings/conflict`.
@@ -343,10 +419,14 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
       }
       // Legacy connection proxy: object-payload update, resolves void.
       if (typeof (api.settings as ConnectionSettingsLike).update !== 'function') throw new Error('settings.update unavailable')
-      await (api.settings as ConnectionSettingsLike).update!({
-        ns: NS,
-        patch: { ...fields },
-      })
+      try {
+        await (api.settings as ConnectionSettingsLike).update!({
+          ns: NS,
+          patch: { ...fields, proxy: '', proxyHosts: [] },
+        })
+      } catch (err) {
+        throw readableWriteError(err)
+      }
     },
   }
 }

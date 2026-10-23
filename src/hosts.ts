@@ -77,11 +77,10 @@ const EXTRA_MODEL_HOSTS: readonly string[] = [
 ]
 
 /**
- * Default model-API hostnames used to build auto mode. Derived from
- * {@link PROVIDER_ENDPOINTS} rather than maintained as a second hand-written
- * list, so adding a provider endpoint can no longer leave auto mode behind —
- * the drift that made the `meta` endpoint suggest a host auto mode never
- * proxied.
+ * Catalog metadata derived from provider endpoints, not active author defaults.
+ * This list may describe other companies too, but is never automatically merged
+ * into proxy cards or saved rules. The author defaults are defined separately
+ * by BUILTIN_PROXY_GROUPS and BUILTIN_DIRECT_HOSTS below.
  */
 export const DEFAULT_MODEL_HOSTS: readonly string[] = [...new Set([
   ...Object.values(PROVIDER_ENDPOINTS).map(endpoint => hostnameOf(endpoint)),
@@ -89,23 +88,40 @@ export const DEFAULT_MODEL_HOSTS: readonly string[] = [...new Set([
 ])].sort()
 
 /**
- * Templated endpoints, written as glob entries. `*` matches any run of
- * characters except a dot, so:
- *
- * - `*-aiplatform.googleapis.com` covers `us-central1-aiplatform.googleapis.com`
- *   and its siblings (Vertex builds the label into the hostname);
- * - `*.openai.azure.com` covers `{resource}.openai.azure.com`.
- *
- * A leading-dot entry would NOT cover the Vertex shape: those hosts are not
- * subdomains of `aiplatform.googleapis.com`.
+ * Supplemental catalog suffix metadata, not automatically active rules.
+ * Only the leading *.host format is supported (root plus all child levels).
+ * Regional Vertex hosts such as us-central1-aiplatform.googleapis.com are not
+ * children of aiplatform.googleapis.com; the author's *.googleapis.com rule
+ * covers them. These metadata entries do not add Azure or other default cards.
  */
 export const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[] = [
   '*.aiplatform.googleapis.com',
   '*.openai.azure.com',
 ]
 
-/** Author-supplied defaults, seeded only when proxyHosts is absent, never merged on read. */
-export const BUILTIN_PROXY_HOSTS: readonly string[] = ['auth.openai.com']
+/** Author defaults for the single global bypass list; explicit saved lists always win. */
+export const BUILTIN_DIRECT_HOSTS: readonly string[] = ['*.deepseek.com']
+
+/** The four company groups seeded into the initial 代理1 card, never new user cards. */
+export const BUILTIN_PROXY_GROUPS: readonly { name: string; hosts: readonly string[] }[] = [
+  { name: 'OpenAI', hosts: ['*.openai.com', '*.chatgpt.com'] },
+  { name: 'Anthropic', hosts: ['*.anthropic.com', '*.claude.ai', '*.claude.com'] },
+  // Gemini's API and regional Vertex endpoints share googleapis.com. This
+  // intentionally covers other Google APIs too, but not all google.com sites.
+  { name: 'Google', hosts: ['*.googleapis.com', '*.gemini.google.com'] },
+  { name: 'xAI', hosts: ['*.x.ai', '*.grok.com'] },
+]
+
+/** Only missing legacy/default rules are seeded; deletion and explicit [] remain final. */
+export const BUILTIN_PROXY_HOSTS: readonly string[] = BUILTIN_PROXY_GROUPS.flatMap(group => group.hosts)
+
+/** Identify an exact author-supplied rule, not every host a wildcard happens to cover. */
+export function builtinHostProvider(entry: string): string | undefined {
+  const host = normalizeHostEntry(entry)
+  if (host === undefined) return undefined
+  if (BUILTIN_DIRECT_HOSTS.includes(host)) return 'DeepSeek'
+  return BUILTIN_PROXY_GROUPS.find(group => group.hosts.includes(host))?.name
+}
 
 /** Exact domains match only themselves; only *.domain opts into suffix matching. */
 export function hostMatches(hostname: string, entry: string): boolean {

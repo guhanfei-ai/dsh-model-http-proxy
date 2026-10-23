@@ -1,15 +1,23 @@
 /** Shared fields for the domain-routing settings page. */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { HostSuggestion } from './settings-io.js'
-import { BUILTIN_PROXY_HOSTS, normalizeHostEntry } from '../hosts.js'
+import { BUILTIN_DIRECT_HOSTS, BUILTIN_PROXY_HOSTS, builtinHostProvider, normalizeHostEntry } from '../hosts.js'
+import { HostPicker } from './host-picker.js'
+import type { HostPickerOption } from './host-picker.js'
 import css from './card.module.css'
 
 const KIND_LABEL: Record<HostSuggestion['kind'], string> = {
-  builtin: '内置',
+  builtin: '预置规则',
   routable: '模型目录',
   configured: '已配置·未验证',
-  fallback: '内置兜底',
+  fallback: '目录兜底',
   saved: '自定义·已保存',
+}
+
+/** Adapter aliases share one company label; keep the underlying catalog intact. */
+function providerLabel(providers: readonly string[]): string {
+  return [...new Set(providers.map(name => /^deepseek(?:[\s_-]+(?:account|official))?$/iu.test(name.trim())
+    ? 'DeepSeek' : name))].join(' / ')
 }
 
 export function ValueField(props: {
@@ -30,12 +38,16 @@ export function ValueField(props: {
         id={props.id}
         className={css.input}
         type="text"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck={false}
+        aria-describedby={`${props.id}-hint`}
         value={props.value}
         placeholder={props.placeholder}
         disabled={props.disabled}
         onChange={(event) => { props.onEdit(event.target.value) }}
       />
-      <p className={css.hint}>{props.hint}</p>
+      <p className={css.hint} id={`${props.id}-hint`}>{props.hint}</p>
     </div>
   )
 }
@@ -68,6 +80,9 @@ export function HostField(props: {
   suggestions: HostSuggestion[]
   disabled: boolean
   proxyRules?: boolean
+  scopeLabel?: string
+  otherProxies?: { name: string; proxyHosts: string[] }[]
+  conflicts?: { host: string; message: string }[]
   onChange: (next: string[]) => void
   onEditingChange: (editing: boolean) => void
 }) {
@@ -75,21 +90,56 @@ export function HostField(props: {
   const [editor, setEditor] = useState<{ index: number | null; original: string; text: string } | null>(null)
   const [problem, setProblem] = useState('')
   const editing = editor !== null
+  const editingCallback = useRef(props.onEditingChange)
+  editingCallback.current = props.onEditingChange
   useEffect(() => {
-    props.onEditingChange(editing)
-    return () => { props.onEditingChange(false) }
-  }, [editing, props.onEditingChange])
-  const taken = new Set([...props.value, ...props.opposite].map(hostKey))
-  const options = props.suggestions.filter(option => normalizeHostEntry(option.host) !== undefined && !taken.has(hostKey(option.host)))
-  // A selection may become unavailable after editing the other list or rereading.
-  const choice = options.find(option => option.host === selected)
+    editingCallback.current(editing)
+    return () => { editingCallback.current(false) }
+  }, [editing])
+  const accessibleLabel = props.scopeLabel ? `${props.scopeLabel} · ${props.label}` : props.label
+  // Keep taken candidates visible so a configured wildcard never looks missing.
+  // Direct exceptions may intentionally overlap proxy rules on other lists.
+  const taken = new Set(props.value.map(hostKey))
+  const ownersOf = (host: string): string[] => (props.otherProxies ?? [])
+    .filter(entry => entry.proxyHosts.some(rule => hostKey(rule) === hostKey(host)))
+    .map(entry => entry.name)
+  const presetOrder = props.proxyRules ? [...BUILTIN_PROXY_HOSTS, ...BUILTIN_DIRECT_HOSTS] : [...BUILTIN_DIRECT_HOSTS, ...BUILTIN_PROXY_HOSTS]
+  const rank = (host: string): number => {
+    const index = presetOrder.indexOf(hostKey(host))
+    return index < 0 ? presetOrder.length : index
+  }
+  const options: HostPickerOption[] = props.suggestions
+    .filter(option => normalizeHostEntry(option.host) !== undefined)
+    .map(option => {
+      const company = builtinHostProvider(option.host)
+      const own = taken.has(hostKey(option.host))
+      const owners = ownersOf(option.host)
+      const status = own ? '已添加' : owners.length > 0 ? `已由 ${owners.join(' / ')} 使用` : undefined
+      return {
+        host: option.host,
+        description: company ?? (providerLabel(option.providers) || KIND_LABEL[option.kind]),
+        group: company !== undefined || option.kind === 'builtin' ? 'preset' as const : 'model' as const,
+        disabled: own || owners.length > 0,
+        ...(status === undefined ? {} : { status }),
+      }
+    })
+    .sort((left, right) => {
+      if (left.group !== right.group) return left.group === 'preset' ? -1 : 1
+      if (left.group === 'preset' && rank(left.host) !== rank(right.host)) return rank(left.host) - rank(right.host)
+      return left.host.localeCompare(right.host)
+    })
+  const choice = options.find(option => option.host === selected && !option.disabled)
+  const conflictOf = (host: string): string | undefined => props.conflicts?.find(conflict => hostKey(conflict.host) === hostKey(host))?.message
 
   function sourceOf(host: string): string {
     const key = hostKey(host)
-    if (BUILTIN_PROXY_HOSTS.some(entry => hostKey(entry) === key)) return '内置'
+    const builtin = builtinHostProvider(host)
+    if (builtin !== undefined) return builtin
     const suggestion = props.suggestions.find(option => hostKey(option.host) === key)
     if (!suggestion) return '自定义'
-    return `${KIND_LABEL[suggestion.kind]}${suggestion.providers.length > 0 ? ` · ${suggestion.providers.join(' / ')}` : ''}`
+    const providers = providerLabel(suggestion.providers)
+    if (suggestion.kind === 'builtin') return providers || '预置规则'
+    return `${KIND_LABEL[suggestion.kind]}${providers ? ` · ${providers}` : ''}`
   }
 
   function confirm(): void {
@@ -127,7 +177,10 @@ export function HostField(props: {
         <input
           autoFocus
           className={css.input}
-          aria-label={`${props.label}${editor.index === null ? '手工添加' : '编辑'}域名`}
+          aria-label={`${accessibleLabel}${editor.index === null ? '手工添加' : '编辑'}域名`}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
           aria-invalid={problem.length > 0}
           aria-describedby={problem ? `${props.id}-error` : undefined}
           placeholder="example.com 或 *.example.com"
@@ -151,19 +204,11 @@ export function HostField(props: {
         <h2 id={`${props.id}-heading`} className={css.sectionTitle}>{props.label}</h2>
         <span className={css.priority}>{props.priority}</span>
       </div>
-      <p className={css.hint}>{props.hint}</p>
+      <p className={css.hint} id={`${props.id}-hint`}>{props.hint}</p>
       <div className={css.picker}>
-        <select
-          id={props.id}
-          className={css.input}
-          aria-label={`选择${props.label}`}
-          value={choice ? selected : ''}
-          disabled={props.disabled}
-          onChange={event => { setSelected(event.target.value) }}
-        >
-          <option value="">{options.length > 0 ? '从候选域名中选择' : '暂无可选域名，可手工添加'}</option>
-          {options.map(option => <option key={option.host} value={option.host}>{option.host} — {sourceOf(option.host)}</option>)}
-        </select>
+        <HostPicker id={props.id} label={`选择${accessibleLabel}`} describedBy={`${props.id}-hint`}
+          value={options.some(option => option.host === selected) ? selected : ''} options={options} disabled={props.disabled}
+          onChange={host => { setSelected(host) }} />
         <button type="button" className={css.secondary} disabled={props.disabled || !choice} onClick={() => {
           if (!choice || taken.has(hostKey(choice.host))) return
           props.onChange([...props.value, choice.host])
@@ -184,12 +229,13 @@ export function HostField(props: {
                 <span className={css.hostName}>{host}</span>
                 <span className={css.source}>来源：{sourceOf(host)}</span>
                 {host.trim().startsWith('.') ? <span className={css.ruleWarning}>旧写法：请编辑为 *{host.trim()}</span> : null}
-                {props.opposite.some(entry => hostKey(entry) === hostKey(host))
-                  ? <span className={css.ruleWarning}>相同规则冲突 · 直连优先</span>
-                  : props.proxyRules && props.opposite.some(entry => coveredBy(host, entry))
-                    ? <span className={css.ruleWarning}>被直连规则覆盖</span>
-                    : props.proxyRules && props.opposite.some(entry => coveredBy(entry, host))
-                      ? <span className={css.ruleWarning}>部分域名直连</span>
+                {conflictOf(host) ? <span className={css.ruleConflict} role="alert">{conflictOf(host)}</span> : null}
+                {props.proxyRules && props.opposite.some(entry => coveredBy(host, entry))
+                  ? <span className={css.ruleWarning}>被全局直连规则覆盖 · 使用本机默认网络</span>
+                  : props.proxyRules && props.opposite.some(entry => coveredBy(entry, host))
+                    ? <span className={css.ruleWarning}>部分域名使用本机默认网络</span>
+                    : !props.proxyRules && props.opposite.some(entry => coveredBy(host, entry) || coveredBy(entry, host))
+                      ? <span className={css.ruleWarning}>此直连规则优先于代理卡片</span>
                       : null}
               </div>
               <div className={css.rowActions}>
@@ -203,7 +249,7 @@ export function HostField(props: {
             </>}
           </li>
         ))}
-        {props.value.length === 0 ? <li className={css.emptyList}>暂无规则{props.proxyRules ? '，所有请求直连' : ''}</li> : null}
+        {props.value.length === 0 ? <li className={css.emptyList}>{props.proxyRules ? '暂无代理规则，此卡片不代理任何域名' : '暂无全局直连规则'}</li> : null}
         {editor?.index === null ? <li className={css.hostRow}>{renderEditor()}</li> : null}
       </ul>
       {problem ? <p className={`${css.hint} ${css.statusFailed}`} id={`${props.id}-error`} role="alert">{problem}</p> : null}

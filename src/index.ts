@@ -15,23 +15,16 @@ import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls in the `Context.settings` augmentation without importing a
 // value, so the module's named exports are not part of this module's link step.
 import type {} from '@deepseek-ai/dsh-settings'
-import { assertValid, Config, redactProxyUrl } from './config.js'
+import { assertValid, resolveVolatile } from './config.js'
 import type { Config as PluginConfig } from './config.js'
-import { BUILTIN_PROXY_HOSTS } from './hosts.js'
-import {
-  DEFAULT_DEEPSEEK_HOST,
-  DEFAULT_MODEL_HOST_SUFFIXES,
-  DEFAULT_MODEL_HOSTS,
-  emptyRules,
-  hostnameOf,
-  normalizeHostEntry,
-} from './proxy.js'
+import { emptyRules, normalizeHostEntry, createMultiProxyFetch } from './proxy.js'
 import type { HostRules, ProxyFetch } from './proxy.js'
-import { createProxyFetch } from './proxy.js'
+import { routingFieldsOf } from './routes.js'
+import type { RoutingFields } from './routes.js'
 
 export { Config, assertValid, configProblem, SUPPORTED_PROXY_SCHEMES, redactProxyUrl } from './config.js'
 export type { Config as PluginConfig } from './config.js'
-export { BUILTIN_PROXY_HOSTS } from './hosts.js'
+export { BUILTIN_DIRECT_HOSTS, BUILTIN_PROXY_GROUPS, BUILTIN_PROXY_HOSTS, builtinHostProvider } from './hosts.js'
 export {
   DEFAULT_DEEPSEEK_HOST,
   DEFAULT_MODEL_HOST_SUFFIXES,
@@ -39,6 +32,7 @@ export {
   addHostEntries,
   createProxyDispatcher,
   createProxyFetch,
+  createMultiProxyFetch,
   emptyRules,
   hostMatches,
   hostnameOf,
@@ -52,6 +46,8 @@ export {
   visibleHostSuggestions,
 } from './proxy.js'
 export type { HostChoiceLike, HostLists, HostRules, ProxyFetch } from './proxy.js'
+export { routingFieldsOf, proxyConflicts, selectProxy } from './routes.js'
+export type { ProxyEntry, RoutingFields, ProxyConflict } from './routes.js'
 
 /** Plugin short name (also its settings namespace). */
 export const name = 'model-proxy'
@@ -86,7 +82,7 @@ interface LoggerLike {
  * @param ctx - the Cordis context, for the optional settings service.
  * @returns the live section values, or undefined when the service has no row.
  */
-function liveConfigOf(ctx: Context): PluginConfig | undefined {
+function liveConfigOf(ctx: Context): { value: unknown } | undefined {
   let row: SettingsRow | undefined
   try {
     const settings = ctx.get('settings') as SettingsLike | undefined
@@ -94,16 +90,20 @@ function liveConfigOf(ctx: Context): PluginConfig | undefined {
   } catch {
     return undefined
   }
-  const value = row?.value
-  if (value === null || typeof value !== 'object') return undefined
-  const section = value as { proxy?: unknown; proxyHosts?: unknown; excludeHosts?: unknown }
-  const listOf = (input: unknown): string[] =>
-    Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : []
-  return {
-    proxy: typeof section.proxy === 'string' ? section.proxy : '',
-    proxyHosts: section.proxyHosts === undefined ? [...BUILTIN_PROXY_HOSTS] : listOf(section.proxyHosts),
-    excludeHosts: listOf(section.excludeHosts),
+  if (row?.value === undefined) return undefined
+  // Keep even an invalid raw section intact. Treating null/string as absence
+  // would revive the mount-time snapshot instead of retaining the last state.
+  return { value: row.value }
+}
+
+/** Resolve live top-level schema fields without defaulting away invalid data. */
+function resolvedConfigOf(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  const section = { ...value } as Record<string, unknown>
+  for (const key of ['proxies', 'proxy', 'proxyHosts', 'excludeHosts']) {
+    if (key in section) section[key] = resolveVolatile(section[key])
   }
+  return section
 }
 
 /** Add one raw entry to a rule set, ignoring entries routing cannot use. */
@@ -115,26 +115,22 @@ function addEntries(target: Set<string>, entries: readonly string[]): void {
 }
 
 /** Explicit saved rules only. Empty is empty; no implicit catalog or builtin union. */
-export function collectRules(_ctx: Context, config: PluginConfig): HostRules {
+export function collectRules(_ctx: Context, config: PluginConfig | RoutingFields): HostRules {
+  const resolved = resolvedConfigOf(config) as PluginConfig | RoutingFields
+  const fields = routingFieldsOf(resolved)
   const rules = emptyRules()
-  addEntries(rules.includes, config.proxyHosts)
-  addEntries(rules.excludes, config.excludeHosts)
+  const legacy = resolved.proxies === undefined
+  for (const proxy of fields.proxies) {
+    if (legacy || proxy.enabled) addEntries(rules.includes, proxy.proxyHosts)
+  }
+  addEntries(rules.excludes, fields.excludeHosts)
   return rules
 }
 
-/** Replace a rule set's contents in place, keeping its identity for the dispatcher. */
-function applyRules(target: HostRules, next: HostRules): void {
-  target.includes.clear()
-  for (const host of next.includes) target.includes.add(host)
-  target.excludes.clear()
-  for (const host of next.excludes) target.excludes.add(host)
-}
-
 /**
- * Install the routing wrapper. The plugin reads its config per refresh, so a
- * settings change reaches the next request without a restart; an empty `proxy`
- * deactivates routing and restores the platform fetch when this plugin still
- * owns it.
+ * Install the routing wrapper. Each refresh builds a complete next generation
+ * before publishing it. With no enabled cards, restore the captured fetch only
+ * when this plugin still owns it. Retained outer wrappers continue to work.
  *
  * Recovery is deliberate: an invalid configuration leaves the last working
  * routing in place and logs the reason (with credentials redacted) instead of
@@ -143,12 +139,10 @@ function applyRules(target: HostRules, next: HostRules): void {
  * @param ctx - the Cordis context this plugin mounts into.
  * @param config - composition entry config; the `base` layer under user settings.
  */
-export function apply(ctx: Context, config: PluginConfig): void {
+export function apply(ctx: Context, config: PluginConfig | RoutingFields): void {
   const baseFetch = globalThis.fetch
-  // One rule object for the dispatcher's lifetime; settings changes rewrite it.
-  const rules = emptyRules()
   let runtime: ProxyFetch | undefined
-  let activeUrl = ''
+  let activeKey = ''
   let disposed = false
 
   /** Pass through when inactive or disposed, so no request lands on a closed dispatcher. */
@@ -170,7 +164,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const deactivate = (): void => {
     const previous = runtime
     runtime = undefined
-    activeUrl = ''
+    activeKey = ''
     uninstall()
     if (previous !== undefined) void previous.close().catch(() => { /* a closed transport is the goal */ })
   }
@@ -185,49 +179,42 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   const refresh = (): void => {
     if (disposed) return
-    // The settings document is authoritative once the service is present: it
-    // carries the value a save just wrote, whichever way the loader delivers it.
-    const cfg = liveConfigOf(ctx) ?? config
-    // Settings `proxy` wins; the `DSH_HTTP_PROXY` environment variable is the
-    // no-file fallback so a deployment can set the proxy without editing settings.
-    const proxyUrl = cfg.proxy.length > 0 ? cfg.proxy : (process.env.DSH_HTTP_PROXY ?? '')
-    if (proxyUrl.length === 0) {
-      deactivate()
-      return
-    }
+    // Preserve proxies and malformed data all the way to validation. The env
+    // fallback is evaluated only by legacy migration, never for a new list.
+    let fields: RoutingFields
     try {
-      assertValid({ proxy: proxyUrl, proxyHosts: cfg.proxyHosts, excludeHosts: cfg.excludeHosts })
+      const live = liveConfigOf(ctx)
+      const cfg = resolvedConfigOf(live === undefined ? config : live.value)
+      fields = routingFieldsOf(cfg, process.env.DSH_HTTP_PROXY ?? '')
+      assertValid(fields)
     } catch (cause) {
-      // Keep the last working routing: a typo in an unrelated field must not
-      // silently disable a proxy the user depends on.
       logger().warn(
         'model-proxy: configuration rejected (%s); keeping the previous routing',
-        cause instanceof Error ? cause.message : String(cause),
+        cause instanceof Error ? cause.message : 'invalid configuration',
       )
       return
     }
-    const nextRules = collectRules(ctx, cfg)
-    if (runtime !== undefined && activeUrl === proxyUrl) {
-      applyRules(rules, nextRules)
-      // Same proxy, new host rules: the dispatcher reads the rule set live.
+    if (!fields.proxies.some(proxy => proxy.enabled)) {
+      deactivate()
+      return
+    }
+    const key = JSON.stringify(fields)
+    if (runtime !== undefined && activeKey === key) {
       install()
       return
     }
     let next: ProxyFetch
     try {
-      next = createProxyFetch(baseFetch, proxyUrl, rules)
-    } catch (cause) {
-      logger().warn(
-        'model-proxy: cannot create a dispatcher for "%s" (%s); keeping the previous routing',
-        redactProxyUrl(proxyUrl),
-        cause instanceof Error ? cause.message : String(cause),
-      )
+      next = createMultiProxyFetch(baseFetch, fields)
+    } catch {
+      // Transport constructors can echo their complete input in an exception.
+      // Do not forward arbitrary exception text containing proxy credentials.
+      logger().warn('model-proxy: cannot create proxy dispatchers; keeping the previous routing')
       return
     }
-    applyRules(rules, nextRules)
     const previous = runtime
     runtime = next
-    activeUrl = proxyUrl
+    activeKey = key
     // Publish before closing the old transport, so requests started after this
     // point always land on a live dispatcher.
     install()

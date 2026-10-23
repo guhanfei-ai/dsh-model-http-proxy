@@ -15,7 +15,10 @@
  */
 
 import { Dispatcher, ProxyAgent, Socks5ProxyAgent, getGlobalDispatcher } from 'undici'
-import { hostnameOf, isRoutedHost } from './hosts.js'
+import { isRoutedHost } from './hosts.js'
+import { routingFieldsOf, selectProxy } from './routes.js'
+import type { RoutingFields } from './routes.js'
+import { assertValid } from './validate.js'
 
 export {
   DEFAULT_DEEPSEEK_HOST,
@@ -73,43 +76,32 @@ export function shouldProxy(
 }
 
 /**
- * A dispatcher that picks a transport per request origin: the proxy dispatcher
- * for routed hosts, the process global dispatcher for everything else.
- *
- * undici's fetch calls `dispatch` once per hop, passing that hop's `origin`, so
- * redirects are re-evaluated instead of keeping the first hop's decision. This
- * is why the plugin does not choose a fetch implementation per call.
+ * Every redirect is a fresh dispatch and therefore a fresh routing decision.
+ * Undefined means the exact process global dispatcher, never a direct Agent.
+ * Selection/dispatch failures propagate; a chosen proxy is never retried direct.
  */
 class RoutingDispatcher extends Dispatcher {
-  #proxy: Dispatcher
-  #rules: HostRules
+  #select: (hostname: string) => Dispatcher | undefined
+  #transports: Dispatcher[]
 
-  constructor(proxy: Dispatcher, rules: HostRules) {
+  constructor(select: (hostname: string) => Dispatcher | undefined, transports: Dispatcher[]) {
     super()
-    this.#proxy = proxy
-    this.#rules = rules
+    this.#select = select
+    this.#transports = transports
   }
 
   override dispatch(options: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandler): boolean {
-    return (this.#routes(options.origin) ? this.#proxy : getGlobalDispatcher()).dispatch(options, handler)
-  }
-
-  /** Whether one hop's origin belongs to the proxy; unreadable origins stay direct. */
-  #routes(origin: string | URL | undefined): boolean {
-    if (origin === undefined) return false
+    let hostname: string | undefined
     try {
-      return isRoutedHost(new URL(String(origin)).hostname, this.#rules.includes, this.#rules.excludes)
-    } catch {
-      return false
-    }
+      if (options.origin !== undefined) hostname = new URL(String(options.origin)).hostname
+    } catch { /* an unreadable origin has no matching host rule */ }
+    const selected = hostname === undefined ? undefined : this.#select(hostname)
+    return (selected ?? getGlobalDispatcher()).dispatch(options, handler)
   }
 
-  /**
-   * Close only the proxy transport. The global dispatcher is shared with the
-   * rest of the process and must survive this plugin's teardown.
-   */
-  override close(): Promise<void> {
-    return this.#proxy.close()
+  /** Close only owned transports, gracefully; the process dispatcher is shared. */
+  override async close(): Promise<void> {
+    await Promise.all(this.#transports.map(transport => transport.close()))
   }
 }
 
@@ -143,6 +135,9 @@ export function createProxyDispatcher(proxyUrl: string): Dispatcher {
   if (scheme === 'socks5' || scheme === 'socks5h' || scheme === 'socks') {
     const username = url.username.length > 0 ? decodeURIComponent(url.username) : undefined
     const password = url.password.length > 0 ? decodeURIComponent(url.password) : undefined
+    // undici resolves SOCKS names at the proxy already, but its constructor
+    // accepts only socks5:/socks:, not the equivalent socks5h: spelling.
+    url.protocol = 'socks5:'
     return new Socks5ProxyAgent(endpointOf(url).endpoint, {
       ...(username === undefined ? {} : { username }),
       ...(password === undefined ? {} : { password }),
@@ -178,21 +173,85 @@ export interface ProxyFetch {
  * @returns the routing fetch and its transport closer.
  */
 export function createProxyFetch(baseFetch: typeof fetch, proxyUrl: string, rules: HostRules): ProxyFetch {
-  const routing = new RoutingDispatcher(createProxyDispatcher(proxyUrl), rules)
+  const proxy = createProxyDispatcher(proxyUrl)
+  return fetchWithRouting(baseFetch, new RoutingDispatcher(
+    hostname => isRoutedHost(hostname, rules.includes, rules.excludes) ? proxy : undefined,
+    [proxy],
+  ))
+}
+
+/**
+ * Build a complete immutable routing generation before the caller publishes it.
+ * If any transport cannot be constructed, close everything already constructed
+ * and throw; the caller can keep the previous generation without a routing gap.
+ */
+export function createMultiProxyFetch(baseFetch: typeof fetch, fields: RoutingFields): ProxyFetch {
+  assertValid(fields)
+  const snapshot = routingFieldsOf(fields)
+  const transports = new Map<string, Dispatcher>()
+  try {
+    for (const proxy of snapshot.proxies) {
+      if (proxy.enabled) transports.set(proxy.id, createProxyDispatcher(proxy.proxy))
+    }
+  } catch (cause) {
+    for (const transport of transports.values()) void transport.close().catch(() => { /* not published */ })
+    throw cause
+  }
+  return fetchWithRouting(baseFetch, new RoutingDispatcher(hostname => {
+    const proxy = selectProxy(hostname, snapshot)
+    if (proxy === undefined) return undefined
+    const transport = transports.get(proxy.id)
+    // An invariant failure must not turn a required proxy into default routing.
+    if (transport === undefined) throw new Error('model-proxy: selected proxy transport is unavailable')
+    return transport
+  }, [...transports.values()]))
+}
+
+/**
+ * Keep a retiring generation alive until all fetches reach their final headers:
+ * closing a transport after an intermediate redirect response would otherwise
+ * reject the next hop. After headers, undici.close() drains streaming bodies.
+ * The lifecycle's stable wrapper always sends later calls to its new generation.
+ */
+function fetchWithRouting(baseFetch: typeof fetch, routing: RoutingDispatcher): ProxyFetch {
+  let pending = 0
+  let retiring = false
+  let draining = false
+  let closePromise: Promise<void> | undefined
+  let resolveClose: (() => void) | undefined
+  let rejectClose: ((cause: unknown) => void) | undefined
+  const drain = (): void => {
+    if (!retiring || pending > 0 || draining) return
+    draining = true
+    void routing.close().then(resolveClose, rejectClose)
+  }
+  const release = (): void => { pending -= 1; drain() }
   const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
-    // A caller that supplies its own dispatcher (another plugin's tunnel, a test
-    // double) has chosen its transport explicitly; honour it instead of
-    // silently replacing it with this router.
+    // A caller that supplies a dispatcher chose its transport explicitly.
     if ((init as { dispatcher?: unknown } | undefined)?.dispatcher !== undefined) return baseFetch(input, init)
-    return baseFetch(input, {
-      ...init,
-      // undici reads this from the init object; the DOM `RequestInit` type has
-      // no such member, so the boundary cast is the only place it appears.
-      dispatcher: routing,
-    } as RequestInit)
+    if (retiring) return Promise.reject(new Error('model-proxy: routing transport is closed'))
+    pending += 1
+    try {
+      return baseFetch(input, {
+        ...init,
+        // The platform fetch accepts undici's dispatcher even though the DOM
+        // RequestInit type does not declare it. Keep the boundary cast here.
+        dispatcher: routing,
+      } as RequestInit).finally(release)
+    } catch (cause) {
+      release()
+      throw cause
+    }
   }) as typeof fetch
   return {
     fetch: fetchImpl,
-    close: () => routing.close(),
+    close: () => {
+      if (closePromise === undefined) {
+        retiring = true
+        closePromise = new Promise<void>((resolve, reject) => { resolveClose = resolve; rejectClose = reject })
+        drain()
+      }
+      return closePromise
+    },
   }
 }
