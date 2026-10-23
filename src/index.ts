@@ -1,9 +1,12 @@
 /**
- * `dsh-model-http-proxy`: route model-API requests through an HTTP/SOCKS proxy
- * without modifying DeepSeek Harness source. It wraps `globalThis.fetch` —
- * the transport both the DeepSeek adapter and the pi-ai SDK clients use — and
- * sends only model-API hosts through a proxy dispatcher. Web search, web
- * fetch, MCP, and every other host keep the direct path.
+ * `dsh-model-http-proxy`: route selected request domains through an HTTP/SOCKS
+ * proxy without modifying DeepSeek Harness source.
+ *
+ * The unit of routing is the **domain**, not the provider or the model: the
+ * settings page lists the hosts the chat model picker currently reaches, and
+ * each listed host is proxied or not. Two requests that share a host (a model
+ * API and a web search on `chatgpt.com`, for example) therefore always share a
+ * decision. Only `fetch` traffic is covered — a WebSocket transport is not.
  *
  * @module dsh-model-http-proxy
  */
@@ -12,33 +15,43 @@ import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls in the `Context.settings` augmentation without importing a
 // value, so the module's named exports are not part of this module's link step.
 import type {} from '@deepseek-ai/dsh-settings'
-import { assertValid, Config } from './config.js'
+import { assertValid, Config, redactProxyUrl } from './config.js'
 import type { Config as PluginConfig } from './config.js'
+import { BUILTIN_PROXY_HOSTS } from './hosts.js'
 import {
   DEFAULT_DEEPSEEK_HOST,
   DEFAULT_MODEL_HOST_SUFFIXES,
   DEFAULT_MODEL_HOSTS,
-  createProxyFetch,
-  createRoutingFetch,
+  emptyRules,
   hostnameOf,
   normalizeHostEntry,
 } from './proxy.js'
-import type { ProxyFetch } from './proxy.js'
+import type { HostRules, ProxyFetch } from './proxy.js'
+import { createProxyFetch } from './proxy.js'
 
-export { Config, assertValid, SUPPORTED_PROXY_SCHEMES } from './config.js'
+export { Config, assertValid, configProblem, SUPPORTED_PROXY_SCHEMES, redactProxyUrl } from './config.js'
 export type { Config as PluginConfig } from './config.js'
+export { BUILTIN_PROXY_HOSTS } from './hosts.js'
 export {
   DEFAULT_DEEPSEEK_HOST,
   DEFAULT_MODEL_HOST_SUFFIXES,
   DEFAULT_MODEL_HOSTS,
+  addHostEntries,
+  createProxyDispatcher,
   createProxyFetch,
-  createRoutingFetch,
+  emptyRules,
+  hostMatches,
   hostnameOf,
+  isRoutedHost,
+  matchesAny,
   normalizeHostEntry,
+  overlappingHosts,
+  rebaseProxyFields,
   shouldProxy,
   urlOf,
+  visibleHostSuggestions,
 } from './proxy.js'
-export type { ProxyFetch } from './proxy.js'
+export type { HostChoiceLike, HostLists, HostRules, ProxyFetch } from './proxy.js'
 
 /** Plugin short name (also its settings namespace). */
 export const name = 'model-proxy'
@@ -51,15 +64,15 @@ interface SettingsLike {
   describe?: () => Array<{ ns: string; value?: unknown }>
 }
 
-/** A resolved `llm-pi-ai` section's provider profile subset. */
-interface PiAiSection {
-  providers?: Record<string, { baseURL?: string }>
-}
-
 /** A settings-service describe row (the host shape; `value` is the live config). */
 interface SettingsRow {
   ns: string
   value?: unknown
+}
+
+/** A logger that accepts printf-style arguments, as cordis' does. */
+interface LoggerLike {
+  warn(message: string, ...args: unknown[]): void
 }
 
 /**
@@ -88,120 +101,93 @@ function liveConfigOf(ctx: Context): PluginConfig | undefined {
     Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : []
   return {
     proxy: typeof section.proxy === 'string' ? section.proxy : '',
-    proxyHosts: listOf(section.proxyHosts),
+    proxyHosts: section.proxyHosts === undefined ? [...BUILTIN_PROXY_HOSTS] : listOf(section.proxyHosts),
     excludeHosts: listOf(section.excludeHosts),
   }
 }
 
-/** Read the `llm-pi-ai` section from the settings service, tolerating absence. */
-function piAiSectionOf(ctx: Context): PiAiSection | undefined {
-  try {
-    const settings = ctx.get('settings') as SettingsLike | undefined
-    const row = settings?.describe?.().find(entry => entry.ns === PI_AI_NS)
-    return row?.value as PiAiSection | undefined
-  } catch {
-    // The settings service is optional: without it the auto host set keeps its
-    // built-in defaults, exactly as before.
-    return undefined
+/** Add one raw entry to a rule set, ignoring entries routing cannot use. */
+function addEntries(target: Set<string>, entries: readonly string[]): void {
+  for (const entry of entries) {
+    const normalized = normalizeHostEntry(entry)
+    if (normalized !== undefined) target.add(normalized)
   }
 }
 
-/**
- * Collect the hostnames that should travel through the proxy: the official
- * DeepSeek host (or `DEEPSEEK_BASE_URL`), the default endpoints of the
- * built-in pi-ai providers (catalog routes configure no `baseURL` of their
- * own), the configured `proxyHosts`, and the custom model gateways declared
- * in the `llm-pi-ai` settings section.
- * @param ctx - the Cordis context, for the optional settings service.
- * @param config - the plugin config.
- * @returns the proxied hostname set.
- */
-function collectProxyHosts(ctx: Context, config: PluginConfig): Set<string> {
-  const hosts = new Set<string>()
-  if (config.proxyHosts.length > 0) {
-    // Explicit mode: only the listed hosts are proxied. Entries are normalized
-    // to bare lowercase hostnames (or `.suffix` entries) so mixed case,
-    // `host:port`, pasted URLs, and `*.domain` wildcards still match what
-    // `shouldProxy` compares requests against.
-    for (const host of config.proxyHosts) {
-      const normalized = normalizeHostEntry(host)
-      if (normalized !== undefined) hosts.add(normalized)
-    }
-  } else {
-    // Auto mode: every model-API host DSH knows about.
-    hosts.add(DEFAULT_DEEPSEEK_HOST)
-    // Default endpoints of the installed pi-ai catalog: a catalog route such
-    // as `google-vertex` names no baseURL of its own, so its requests land on
-    // the catalog's endpoint (region-templated for Vertex and Azure, hence
-    // the suffix entries).
-    for (const host of DEFAULT_MODEL_HOSTS) hosts.add(host)
-    for (const suffix of DEFAULT_MODEL_HOST_SUFFIXES) hosts.add(suffix)
-    const deepseekBase = process.env.DEEPSEEK_BASE_URL
-    if (deepseekBase !== undefined && deepseekBase.length > 0) {
-      try {
-        hosts.add(hostnameOf(deepseekBase))
-      } catch {
-        // A malformed base URL is the adapter's to reject, not this plugin's.
-      }
-    }
-    const section = piAiSectionOf(ctx)
-    for (const profile of Object.values(section?.providers ?? {})) {
-      const baseURL = profile.baseURL
-      if (baseURL !== undefined && baseURL.length > 0) {
-        try {
-          hosts.add(hostnameOf(baseURL))
-        } catch {
-          // Same as above: configuration errors surface where they are written.
-        }
-      }
-    }
-  }
-  // Exclusions always win, in either mode — normalized the same way.
-  for (const host of config.excludeHosts) {
-    const normalized = normalizeHostEntry(host)
-    if (normalized !== undefined) hosts.delete(normalized)
-  }
-  return hosts
+/** Explicit saved rules only. Empty is empty; no implicit catalog or builtin union. */
+export function collectRules(_ctx: Context, config: PluginConfig): HostRules {
+  const rules = emptyRules()
+  addEntries(rules.includes, config.proxyHosts)
+  addEntries(rules.excludes, config.excludeHosts)
+  return rules
 }
 
-/** Whether two hostname sets hold the same hosts (sets are small; order-free compare). */
-function sameHostSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
-  if (left.size !== right.size) return false
-  for (const host of left) {
-    if (!right.has(host)) return false
-  }
-  return true
+/** Replace a rule set's contents in place, keeping its identity for the dispatcher. */
+function applyRules(target: HostRules, next: HostRules): void {
+  target.includes.clear()
+  for (const host of next.includes) target.includes.add(host)
+  target.excludes.clear()
+  for (const host of next.excludes) target.excludes.add(host)
 }
 
 /**
  * Install the routing wrapper. The plugin reads its config per refresh, so a
  * settings change reaches the next request without a restart; an empty `proxy`
- * deactivates routing and restores the platform fetch.
+ * deactivates routing and restores the platform fetch when this plugin still
+ * owns it.
+ *
+ * Recovery is deliberate: an invalid configuration leaves the last working
+ * routing in place and logs the reason (with credentials redacted) instead of
+ * silently falling back to direct connections. A deployment that never had a
+ * valid configuration simply keeps the platform fetch untouched.
  * @param ctx - the Cordis context this plugin mounts into.
  * @param config - composition entry config; the `base` layer under user settings.
  */
 export function apply(ctx: Context, config: PluginConfig): void {
-  let current: () => PluginConfig = () => config
-  const originalFetch = globalThis.fetch
-  /** The active routing wrapper plus the config it was built from. */
-  let active: { proxyUrl: string; hosts: Set<string>; entry: ProxyFetch } | undefined
+  const baseFetch = globalThis.fetch
+  // One rule object for the dispatcher's lifetime; settings changes rewrite it.
+  const rules = emptyRules()
+  let runtime: ProxyFetch | undefined
+  let activeUrl = ''
   let disposed = false
 
+  /** Pass through when inactive or disposed, so no request lands on a closed dispatcher. */
+  const wrapper = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const active = runtime
+    return active === undefined ? baseFetch(input, init) : active.fetch(input, init)
+  }) as typeof fetch
+
+  /** Install only over the fetch this wrapper was built on; never clobber a later wrapper. */
+  const install = (): void => {
+    if (globalThis.fetch === baseFetch) globalThis.fetch = wrapper
+  }
+
+  /** Restore the platform fetch only when this plugin is still the installed one. */
+  const uninstall = (): void => {
+    if (globalThis.fetch === wrapper) globalThis.fetch = baseFetch
+  }
+
   const deactivate = (): void => {
-    if (active === undefined) return
-    // Restore the platform fetch first, so no request can land on a closing
-    // dispatcher after this point.
-    globalThis.fetch = originalFetch
-    const entry = active.entry
-    active = undefined
-    void entry.close().catch(() => { /* a closed dispatcher is the goal */ })
+    const previous = runtime
+    runtime = undefined
+    activeUrl = ''
+    uninstall()
+    if (previous !== undefined) void previous.close().catch(() => { /* a closed transport is the goal */ })
+  }
+
+  // A host without a logger still has to report a broken configuration; fall
+  // back to the console rather than throwing while handling a failure.
+  const logger = (): LoggerLike => {
+    const candidate = (ctx as unknown as { logger?: LoggerLike }).logger
+    if (candidate !== undefined && typeof candidate.warn === 'function') return candidate
+    return { warn: (message, ...rest) => { console.warn(message, ...rest) } }
   }
 
   const refresh = (): void => {
     if (disposed) return
     // The settings document is authoritative once the service is present: it
     // carries the value a save just wrote, whichever way the loader delivers it.
-    const cfg = liveConfigOf(ctx) ?? current()
+    const cfg = liveConfigOf(ctx) ?? config
     // Settings `proxy` wins; the `DSH_HTTP_PROXY` environment variable is the
     // no-file fallback so a deployment can set the proxy without editing settings.
     const proxyUrl = cfg.proxy.length > 0 ? cfg.proxy : (process.env.DSH_HTTP_PROXY ?? '')
@@ -209,35 +195,43 @@ export function apply(ctx: Context, config: PluginConfig): void {
       deactivate()
       return
     }
-    const hosts = collectProxyHosts(ctx, cfg)
-    // No config actually moved: keep the current dispatcher and wrapper, so an
-    // unrelated settings save never tears down in-flight proxy connections.
-    if (active !== undefined && active.proxyUrl === proxyUrl && sameHostSet(active.hosts, hosts)) return
-    let entry: ProxyFetch
     try {
-      // `assertValid` guards the settings write path, but the `DSH_HTTP_PROXY`
-      // fallback bypasses it — judge the resolved URL here too, so a bad value
-      // degrades to "routing off" instead of failing the plugin mount.
       assertValid({ proxy: proxyUrl, proxyHosts: cfg.proxyHosts, excludeHosts: cfg.excludeHosts })
-      entry = createProxyFetch(proxyUrl)
     } catch (cause) {
-      ctx.logger.warn(
-        'model-proxy: invalid proxy URL "%s" (%s); routing stays off',
-        proxyUrl,
+      // Keep the last working routing: a typo in an unrelated field must not
+      // silently disable a proxy the user depends on.
+      logger().warn(
+        'model-proxy: configuration rejected (%s); keeping the previous routing',
         cause instanceof Error ? cause.message : String(cause),
       )
-      deactivate()
       return
     }
-    const next = { proxyUrl, hosts, entry }
-    const previous = active
-    active = next
-    globalThis.fetch = createRoutingFetch(entry.fetch, originalFetch, hosts)
-    // Publish the new wrapper before closing the old dispatcher, so requests
-    // started after this point always land on the live dispatcher.
-    if (previous !== undefined) {
-      void previous.entry.close().catch(() => { /* replaced by a newer wrapper */ })
+    const nextRules = collectRules(ctx, cfg)
+    if (runtime !== undefined && activeUrl === proxyUrl) {
+      applyRules(rules, nextRules)
+      // Same proxy, new host rules: the dispatcher reads the rule set live.
+      install()
+      return
     }
+    let next: ProxyFetch
+    try {
+      next = createProxyFetch(baseFetch, proxyUrl, rules)
+    } catch (cause) {
+      logger().warn(
+        'model-proxy: cannot create a dispatcher for "%s" (%s); keeping the previous routing',
+        redactProxyUrl(proxyUrl),
+        cause instanceof Error ? cause.message : String(cause),
+      )
+      return
+    }
+    applyRules(rules, nextRules)
+    const previous = runtime
+    runtime = next
+    activeUrl = proxyUrl
+    // Publish before closing the old transport, so requests started after this
+    // point always land on a live dispatcher.
+    install()
+    if (previous !== undefined) void previous.close().catch(() => { /* replaced by a newer transport */ })
   }
 
   refresh()

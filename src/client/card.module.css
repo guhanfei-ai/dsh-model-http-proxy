@@ -353,6 +353,26 @@
   white-space: nowrap;
 }
 
+/* How strong the evidence behind a row is. Only "routable" comes from the live
+ * chat model catalog; the others are labelled so a degraded list is not read
+ * as "these are the models in the chat box". */
+.comboItemKind {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  background: var(--dsw-alias-interactive-bg-hover);
+  opacity: 0.75;
+}
+
+.comboItemKind[data-kind='routable'] {
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-bg-layer-3);
+  opacity: 1;
+}
+
 /* The provider a host belongs to, muted: the list is about hosts, the label is
  * what ties a row back to the model menu the user actually sees. */
 .comboItemProvider {
@@ -397,6 +417,26 @@
   outline-offset: 1px;
 }
 
+/* Recovery actions (reread after a revision conflict, confirm overwrite): same
+ * footprint as save, deliberately quieter so the primary action stays clear. */
+.secondary {
+  appearance: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+
+.secondary:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* settings.section 左栏独立页形态（v0.1.2）：无折叠卡壳，字段直接铺开 */
 .page {
   display: flex;
@@ -409,4 +449,128 @@
   opacity: 0.75;
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* Domain rules stay in document order: direct first, proxy second. */
+.rules {
+  margin: 4px 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+.rules h2 { margin: 0 0 6px; }
+.ruleNotes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--dsw-alias-label-tertiary);
+}
+.ruleNotes li + li { margin-top: 4px; }
+
+.hostSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px 0;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+.sectionTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.priority, .count {
+  border-radius: 5px;
+  padding: 2px 6px;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.picker, .inlineEditor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.picker .input, .inlineEditor .input {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+}
+.picker .secondary, .inlineEditor .secondary { flex: none; }
+.listHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.listTitle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+.listHead .secondary { flex: none; }
+.hostList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+.hostRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.hostRow + .hostRow { border-top: 1px solid var(--dsw-alias-border-l2); }
+.hostDetails { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.hostName { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary); }
+.source { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; color: var(--dsw-alias-label-tertiary); }
+.ruleWarning { font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.rowActions { display: flex; flex: none; gap: 8px; }
+.rowButton {
+  appearance: none;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.rowButton:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.rowButton:disabled { opacity: 0.4; cursor: default; }
+.rowButton:focus-visible, .secondary:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.emptyList { padding: 16px 12px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.inlineEditor { flex: 1; flex-wrap: wrap; }
+.inlineEditor .input { flex-basis: 160px; }
+.footer { flex-wrap: wrap; }
+.footer .status { flex-basis: 100%; }
+
+@media (max-width: 480px) {
+  .hostRow { align-items: flex-start; gap: 6px; padding: 10px; }
+  .rowActions { gap: 2px; }
+  .listTitle { font-size: 11px; }
+  .secondary { padding: 5px 9px; }
 }

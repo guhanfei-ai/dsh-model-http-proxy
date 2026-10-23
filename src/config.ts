@@ -4,30 +4,22 @@
  */
 
 import z from '@deepseek-ai/schemastery'
+import { BUILTIN_PROXY_HOSTS } from './hosts.js'
+import type { ProxyConfigLike } from './validate.js'
 
-/** Proxy URL schemes `undici`'s `ProxyAgent` accepts. */
-export const SUPPORTED_PROXY_SCHEMES: readonly string[] = [
-  'http',
-  'https',
-  'socks4',
-  'socks4a',
-  'socks5',
-  'socks5h',
-]
+export { assertValid, configProblem, redactProxyUrl, SUPPORTED_PROXY_SCHEMES } from './validate.js'
+export type { ProxyConfigLike } from './validate.js'
 
 /** Configuration for the `dsh-model-http-proxy` plugin. */
-export interface Config {
+export interface Config extends ProxyConfigLike {
   /**
    * Proxy URL. Empty means the plugin is inactive and no request is routed.
-   * Supported schemes: `http:`, `https:`, `socks4:`, `socks4a:`, `socks5:`,
-   * `socks5h:`.
+   * Supported schemes: `http:`, `https:`, `socks5:`, `socks5h:`, `socks:`.
    */
   proxy: string
   /**
-   * Hostnames routed through the proxy. Empty means "auto-detect all model-API
-   * hosts" (`api.deepseek.com`, `DEEPSEEK_BASE_URL`, and every `llm-pi-ai`
-   * gateway `baseURL`); non-empty means route ONLY these hosts, ignoring
-   * auto-detection.
+   * Explicit proxy rules. Empty means no proxy rules. Author defaults apply
+   * only when the field is absent, never after deleting or saving an empty list.
    */
   proxyHosts: string[]
   /** Hostnames that must never be routed, even when auto-detected or listed. */
@@ -53,34 +45,11 @@ export function resolveVolatile<T>(value: T | VolatileLike<T>): T {
 /**
  * Runtime schema for {@link Config}. The annotation stays loose: `.volatile()`
  * (0.1.7 live-config references) widens the field types past what `z<Config>`
- * accepts under `exactOptionalPropertyTypes`, while `assertValid` below and
- * the apply() consumer both operate on resolved plain values.
+ * accepts under `exactOptionalPropertyTypes`, while `assertValid` and the
+ * apply() consumer both operate on resolved plain values.
  */
 export const Config = z.object({
   proxy: z.string().default('').volatile(),
-  proxyHosts: z.array(z.string()).default([]).volatile(),
+  proxyHosts: z.array(z.string()).default([...BUILTIN_PROXY_HOSTS]).volatile(),
   excludeHosts: z.array(z.string()).default([]).volatile(),
 })
-
-/**
- * Reject a proxy URL this plugin cannot serve. Registered as the settings
- * namespace validator so a bad URL is refused where it is written.
- * @param config - the resolved section to check.
- * @throws Error naming the offending proxy URL.
- */
-export function assertValid(config: Config): void {
-  if (config.proxy.length === 0) return
-  let parsed: URL
-  try {
-    parsed = new URL(config.proxy)
-  } catch {
-    throw new Error(`model-proxy: invalid proxy URL "${config.proxy}"`)
-  }
-  const scheme = parsed.protocol.replace(/:$/, '')
-  if (!SUPPORTED_PROXY_SCHEMES.includes(scheme)) {
-    throw new Error(
-      `model-proxy: proxy URL "${config.proxy}" uses unsupported scheme "${parsed.protocol}";`
-      + ` supported schemes: ${SUPPORTED_PROXY_SCHEMES.join(', ')}`,
-    )
-  }
-}

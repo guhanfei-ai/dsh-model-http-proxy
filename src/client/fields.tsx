@@ -1,42 +1,15 @@
-/**
- * Shared form fields for the Model Http Proxy settings page: one labelled
- * text field and a hostname combobox (free text + suggestions dropdown).
- */
-
-import { useState } from 'react'
-import type { KeyboardEvent } from 'react'
+/** Shared fields for the domain-routing settings page. */
+import { useEffect, useState } from 'react'
 import type { HostSuggestion } from './settings-io.js'
-import { normalizeHostEntry } from '../hosts.js'
+import { BUILTIN_PROXY_HOSTS, normalizeHostEntry } from '../hosts.js'
 import css from './card.module.css'
 
-/**
- * The dropdown chevron, drawn locally instead of imported from the host's
- * primitives module. The icon's export name is not stable across host
- * releases (`IconChevronDownOutline14` on 0.1.x, `IconChevronDownOutlineRegular`
- * on 0.2.x), and requiring the missing name yields `undefined` — which React
- * rejects as an invalid element type (#130) and takes the whole slot entry
- * down with it, leaving the settings page blank. A local SVG has no
- * cross-version surface and keeps the bundle self-contained.
- */
-function ChevronDown(props: { className?: string | undefined }) {
-  return (
-    <svg
-      className={props.className}
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden="true"
-    >
-      <path
-        d="M4 6.25 8 10.25 12 6.25"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
+const KIND_LABEL: Record<HostSuggestion['kind'], string> = {
+  builtin: '内置',
+  routable: '模型目录',
+  configured: '已配置·未验证',
+  fallback: '内置兜底',
+  saved: '自定义·已保存',
 }
 
 export function ValueField(props: {
@@ -67,221 +40,173 @@ export function ValueField(props: {
   )
 }
 
-/**
- * A hostname field that behaves like the host's own tag inputs: every
- * committed host is drawn as a removable chip, and the text cursor lives in a
- * bare input at the end of the row. Focus (or the chevron) opens a dropdown of
- * the providers that are actually configured. Enter or a comma commits what is
- * typed, Backspace on an empty entry drops the last chip, Arrow keys move the
- * highlight, Enter picks a suggestion, Escape closes the list.
- *
- * The chips are the value: `value` is the parsed host list and `onChange`
- * always hands back a whole new list, so the page never has to split text.
- */
+/** Canonical identity for dropdown exclusion, without rewriting legacy entries. */
+function hostKey(host: string): string {
+  return normalizeHostEntry(host) ?? host.trim().toLowerCase()
+}
+
+/** Whether the entire proxy rule is covered by a direct rule. */
+function coveredBy(rule: string, direct: string): boolean {
+  const host = normalizeHostEntry(rule)
+  const exclusion = normalizeHostEntry(direct)
+  if (!host || !exclusion) return false
+  if (host === exclusion) return true
+  if (!exclusion.startsWith('*.')) return false
+  const base = exclusion.slice(2)
+  const target = host.startsWith('*.') ? host.slice(2) : host
+  return target === base || target.endsWith(`.${base}`)
+}
+
+/** Suggestions only populate the picker, never the effective draft list. */
 export function HostField(props: {
   id: string
   label: string
+  priority: string
   hint: string
-  placeholder: string
   value: string[]
+  opposite: string[]
   suggestions: HostSuggestion[]
   disabled: boolean
+  proxyRules?: boolean
   onChange: (next: string[]) => void
+  onEditingChange: (editing: boolean) => void
 }) {
-  const [pending, setPending] = useState('')
-  const [open, setOpen] = useState(false)
-  const [highlight, setHighlight] = useState(0)
-  // Already-committed hostnames, normalized the same way the Host half routes,
-  // so a casing/port/URL variant of a saved host never shows as "new".
-  const present = new Set(
-    props.value.map(host => normalizeHostEntry(host)).filter((host): host is string => host !== undefined),
-  )
-  const query = pending.trim().toLowerCase()
-  // Match the host, and also the provider name behind it, so typing "codex"
-  // finds chatgpt.com and typing "kimi" finds api.kimi.com.
-  const options = props.suggestions.filter(option =>
-    !present.has(option.host)
-    && (query === ''
-      || option.host.includes(query)
-      || option.providers.some(name => name.toLowerCase().includes(query))),
-  )
-  const active = open && highlight >= 0 && highlight < options.length ? highlight : -1
+  const [selected, setSelected] = useState('')
+  const [editor, setEditor] = useState<{ index: number | null; original: string; text: string } | null>(null)
+  const [problem, setProblem] = useState('')
+  const editing = editor !== null
+  useEffect(() => {
+    props.onEditingChange(editing)
+    return () => { props.onEditingChange(false) }
+  }, [editing, props.onEditingChange])
+  const taken = new Set([...props.value, ...props.opposite].map(hostKey))
+  const options = props.suggestions.filter(option => normalizeHostEntry(option.host) !== undefined && !taken.has(hostKey(option.host)))
+  // A selection may become unavailable after editing the other list or rereading.
+  const choice = options.find(option => option.host === selected)
 
-  /** Commit one or more hosts, de-duplicated against what is already selected. */
-  const commit = (text: string): void => {
-    if (props.disabled) return
-    const parts = text.split(/[,，\s]+/).map(part => part.trim()).filter(part => part.length > 0)
-    if (parts.length === 0) return
-    const next = [...props.value]
-    for (const part of parts) {
-      const normalized = normalizeHostEntry(part)
-      if (normalized === undefined) continue
-      if (next.some(existing => normalizeHostEntry(existing) === normalized)) continue
-      next.push(part)
-    }
-    setPending('')
-    if (next.length !== props.value.length) props.onChange(next)
+  function sourceOf(host: string): string {
+    const key = hostKey(host)
+    if (BUILTIN_PROXY_HOSTS.some(entry => hostKey(entry) === key)) return '内置'
+    const suggestion = props.suggestions.find(option => hostKey(option.host) === key)
+    if (!suggestion) return '自定义'
+    return `${KIND_LABEL[suggestion.kind]}${suggestion.providers.length > 0 ? ` · ${suggestion.providers.join(' / ')}` : ''}`
   }
 
-  /** Drop the chip at one index; the rest of the list keeps its order. */
-  const remove = (index: number): void => {
-    if (props.disabled) return
-    props.onChange(props.value.filter((_, position) => position !== index))
+  function confirm(): void {
+    if (props.disabled || !editor) return
+    const text = editor.text.trim()
+    if (text.startsWith('.')) {
+      setProblem(`旧 .host 写法不再支持，请手动改写为 *${text} 后确认。`)
+      return
+    }
+    const host = normalizeHostEntry(text)
+    if (host === undefined) {
+      setProblem('请输入有效的精确 host 或 *.host，不支持其它通配符或旧 .host 写法。')
+      return
+    }
+    if (editor.index !== null && props.value[editor.index] !== editor.original) {
+      setProblem('列表已更新，请取消后重新编辑该规则。')
+      return
+    }
+    if (props.value.some((entry, index) => index !== editor.index && hostKey(entry) === host)) {
+      setProblem('此列表已包含相同规则。')
+      return
+    }
+    // Manual rules may overlap the opposite list: direct routing always wins.
+    props.onChange(editor.index === null
+      ? [...props.value, host]
+      : props.value.map((entry, index) => index === editor.index ? host : entry))
+    setEditor(null)
+    setProblem('')
   }
 
-  const move = (delta: number): void => {
-    if (options.length === 0) return
-    setHighlight(current => (current + delta + options.length) % options.length)
-  }
-
-  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
-    if (event.key === 'Escape') { setOpen(false); return }
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      if (open && options.length > 0 && pending.trim() === '') {
-        const pick = options[active >= 0 ? active : 0]
-        if (pick !== undefined) commit(pick.host)
-        return
-      }
-      if (open && options.length > 0 && active >= 0) {
-        const pick = options[active]
-        if (pick !== undefined) { commit(pick.host); return }
-      }
-      commit(pending)
-      return
-    }
-    if (event.key === 'Backspace' && pending === '' && props.value.length > 0) {
-      event.preventDefault()
-      remove(props.value.length - 1)
-      return
-    }
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      if (!open) { setOpen(true); setHighlight(0); return }
-      move(1)
-      return
-    }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      if (!open) { setOpen(true); setHighlight(options.length - 1); return }
-      move(-1)
-      return
-    }
-    if (event.key === 'Home' && open) { event.preventDefault(); setHighlight(0); return }
-    if (event.key === 'End' && open) { event.preventDefault(); setHighlight(options.length - 1); return }
+  function renderEditor() {
+    if (!editor) return null
+    return (
+      <div className={css.inlineEditor}>
+        <input
+          autoFocus
+          className={css.input}
+          aria-label={`${props.label}${editor.index === null ? '手工添加' : '编辑'}域名`}
+          aria-invalid={problem.length > 0}
+          aria-describedby={problem ? `${props.id}-error` : undefined}
+          placeholder="example.com 或 *.example.com"
+          value={editor.text}
+          disabled={props.disabled}
+          onChange={event => { setEditor({ ...editor, text: event.target.value }); setProblem('') }}
+          onKeyDown={event => {
+            if (event.key === 'Enter') { event.preventDefault(); confirm() }
+            if (event.key === 'Escape') { event.preventDefault(); setEditor(null); setProblem('') }
+          }}
+        />
+        <button type="button" className={css.secondary} disabled={props.disabled} onClick={confirm}>确认</button>
+        <button type="button" className={css.secondary} disabled={props.disabled} onClick={() => { setEditor(null); setProblem('') }}>取消</button>
+      </div>
+    )
   }
 
   return (
-    <div className={css.field}>
+    <section className={css.hostSection} aria-labelledby={`${props.id}-heading`}>
       <div className={css.head}>
-        <label className={css.label} htmlFor={props.id}>{props.label}</label>
-      </div>
-      <div
-        className={css.combo}
-        onBlur={(event) => {
-          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-          setOpen(false)
-          // A host typed but not confirmed still lands: a blur is a commit.
-          commit(pending)
-        }}
-      >
-        <div className={css.comboBox}>
-          {props.value.map((host, index) => (
-            <span className={css.chip} key={`${host}-${index}`}>
-              <span className={css.chipLabel}>{host}</span>
-              <button
-                type="button"
-                className={css.chipRemove}
-                aria-label={`不再代理 ${host}`}
-                disabled={props.disabled}
-                onMouseDown={(event) => { event.preventDefault() }}
-                onClick={() => { remove(index) }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                  <path d="M2 2 8 8M8 2 2 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                </svg>
-              </button>
-            </span>
-          ))}
-          <input
-            id={props.id}
-            className={css.comboEntry}
-            type="text"
-            role="combobox"
-            aria-expanded={open}
-            aria-controls={`${props.id}-list`}
-            aria-autocomplete="list"
-            aria-activedescendant={active >= 0 ? `${props.id}-opt-${active}` : undefined}
-            value={pending}
-            placeholder={props.value.length === 0 ? props.placeholder : ''}
-            disabled={props.disabled}
-            onFocus={() => { setOpen(true); setHighlight(0) }}
-            onChange={(event) => {
-              const text = event.target.value
-              // A comma finishes the entry being typed, exactly like the host's
-              // own tag inputs; the remainder stays editable.
-              if (/[,，]/.test(text)) {
-                const parts = text.split(/[,，]/)
-                commit(parts.slice(0, -1).join(','))
-                setPending(parts[parts.length - 1] ?? '')
-                setOpen(true)
-                setHighlight(0)
-                return
-              }
-              setPending(text)
-              setOpen(true)
-              setHighlight(0)
-            }}
-            onKeyDown={onKeyDown}
-          />
-        </div>
-        <button
-          type="button"
-          className={css.comboChevron}
-          aria-label="选择域名"
-          aria-expanded={open}
-          tabIndex={-1}
-          disabled={props.disabled}
-          onMouseDown={(event) => { event.preventDefault() }}
-          onClick={() => {
-            const next = !open
-            setOpen(next)
-            if (next) setHighlight(0)
-          }}
-        >
-          <ChevronDown className={open ? css.comboChevronOpen : undefined} />
-        </button>
-        {open
-          ? (
-            <ul className={css.comboList} id={`${props.id}-list`} role="listbox">
-              {options.length > 0
-                ? options.map((option, index) => (
-                  <li
-                    key={option.host}
-                    role="option"
-                    id={`${props.id}-opt-${index}`}
-                    aria-selected={index === active}
-                    onMouseEnter={() => { setHighlight(index) }}
-                  >
-                    <button
-                      type="button"
-                      className={css.comboItem}
-                      onMouseDown={(event) => { event.preventDefault() }}
-                      onClick={() => { commit(option.host) }}
-                    >
-                      <span className={css.comboItemHost}>{option.host}</span>
-                      {option.providers.length > 0
-                        ? <span className={css.comboItemProvider}>{option.providers.join(' · ')}</span>
-                        : null}
-                    </button>
-                  </li>
-                ))
-                : <li className={css.comboEmpty}>没有可选的域名</li>}
-            </ul>
-          )
-          : null}
+        <h2 id={`${props.id}-heading`} className={css.sectionTitle}>{props.label}</h2>
+        <span className={css.priority}>{props.priority}</span>
       </div>
       <p className={css.hint}>{props.hint}</p>
-    </div>
+      <div className={css.picker}>
+        <select
+          id={props.id}
+          className={css.input}
+          aria-label={`选择${props.label}`}
+          value={choice ? selected : ''}
+          disabled={props.disabled}
+          onChange={event => { setSelected(event.target.value) }}
+        >
+          <option value="">{options.length > 0 ? '从候选域名中选择' : '暂无可选域名，可手工添加'}</option>
+          {options.map(option => <option key={option.host} value={option.host}>{option.host} — {sourceOf(option.host)}</option>)}
+        </select>
+        <button type="button" className={css.secondary} disabled={props.disabled || !choice} onClick={() => {
+          if (!choice || taken.has(hostKey(choice.host))) return
+          props.onChange([...props.value, choice.host])
+          setSelected('')
+        }}>添加</button>
+      </div>
+      <div className={css.listHead}>
+        <h3 className={css.listTitle}>生效域名列表（保存后生效）<span className={css.count}>{props.value.length}</span></h3>
+        <button type="button" className={css.secondary} disabled={props.disabled || editor !== null} onClick={() => {
+          setEditor({ index: null, original: '', text: '' }); setProblem('')
+        }}>手工添加</button>
+      </div>
+      <ul className={css.hostList}>
+        {props.value.map((host, index) => (
+          <li className={css.hostRow} key={`${host}-${index}`}>
+            {editor?.index === index ? renderEditor() : <>
+              <div className={css.hostDetails}>
+                <span className={css.hostName}>{host}</span>
+                <span className={css.source}>来源：{sourceOf(host)}</span>
+                {host.trim().startsWith('.') ? <span className={css.ruleWarning}>旧写法：请编辑为 *{host.trim()}</span> : null}
+                {props.opposite.some(entry => hostKey(entry) === hostKey(host))
+                  ? <span className={css.ruleWarning}>相同规则冲突 · 直连优先</span>
+                  : props.proxyRules && props.opposite.some(entry => coveredBy(host, entry))
+                    ? <span className={css.ruleWarning}>被直连规则覆盖</span>
+                    : props.proxyRules && props.opposite.some(entry => coveredBy(entry, host))
+                      ? <span className={css.ruleWarning}>部分域名直连</span>
+                      : null}
+              </div>
+              <div className={css.rowActions}>
+                <button type="button" className={css.rowButton} aria-label={`编辑 ${host}`} disabled={props.disabled || editor !== null} onClick={() => {
+                  setEditor({ index, original: host, text: host }); setProblem('')
+                }}>编辑</button>
+                <button type="button" className={css.rowButton} aria-label={`删除 ${host}`} disabled={props.disabled || editor !== null} onClick={() => {
+                  props.onChange(props.value.filter((_, position) => position !== index))
+                }}>删除</button>
+              </div>
+            </>}
+          </li>
+        ))}
+        {props.value.length === 0 ? <li className={css.emptyList}>暂无规则{props.proxyRules ? '，所有请求直连' : ''}</li> : null}
+        {editor?.index === null ? <li className={css.hostRow}>{renderEditor()}</li> : null}
+      </ul>
+      {problem ? <p className={`${css.hint} ${css.statusFailed}`} id={`${props.id}-error`} role="alert">{problem}</p> : null}
+    </section>
   )
 }

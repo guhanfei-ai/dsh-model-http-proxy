@@ -1,7 +1,8 @@
 {
   "name": "dsh-model-http-proxy",
-  "description": "模型代理：按模型/提供方精准路由模型 API 请求走代理或直连，其余请求不受影响（Route model-API traffic per provider; everything else stays direct）",
+  "description": "按域名决定哪些 HTTP 请求走代理或直连（Route requests per domain through a proxy; everything else stays direct）",
   "version": "0.1.2",
+  "packageManager": "pnpm@9.15.9",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -42,8 +43,10 @@
   "sideEffects": false,
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && tsdown",
-    "prepublishOnly": "pnpm build",
-    "typecheck": "tsc --noEmit"
+    "prepublishOnly": "npm run verify",
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run build && npm run test"
   },
   "dsh": {
     "bundle": {

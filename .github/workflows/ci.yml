@@ -1,0 +1,31 @@
+name: ci
+
+# Every push and pull request runs the same gate the release script uses, so a
+# version can never be tagged from code that would fail `deploy.sh build`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Offline tests only: no real model API, no proxy, no registry writes.
+      - run: npm run verify
+      - name: Pack the exact archive the release script expects
+        run: |
+          npm pack --pack-destination dist --ignore-scripts
+          tar -tzf "dist/$(node -p 'require("./package.json").name')-$(node -p 'require("./package.json").version').tgz"

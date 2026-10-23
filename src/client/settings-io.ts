@@ -21,9 +21,18 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import {
   DEFAULT_DEEPSEEK_HOST,
+  BUILTIN_PROXY_HOSTS,
+  addHostEntries,
   normalizeHostEntry,
+  overlappingHosts,
   providerEndpointHost,
+  rebaseProxyFields,
+  visibleHostSuggestions,
 } from '../hosts.js'
+
+// The cross-field guards are shared with the Host half so the pure matching
+// rules have one implementation and one test suite.
+export { addHostEntries, overlappingHosts, rebaseProxyFields, visibleHostSuggestions }
 
 /** Settings namespace the Host half owns; keep in sync with src/index.ts. */
 const NS = 'model-proxy'
@@ -66,7 +75,7 @@ interface SettingsApi {
 
 /** The `model-proxy` fields this page edits (mirror of the Host Config). */
 export interface ProxyFields {
-  /** Proxy URL (http/https/socks4/socks4a/socks5/socks5h); empty = inactive. */
+  /** Proxy URL (http/https/socks5/socks5h); empty = inactive. */
   proxy: string
   /** Hostnames to proxy (empty = auto-detect every model host). */
   proxyHosts: string[]
@@ -74,16 +83,18 @@ export interface ProxyFields {
   excludeHosts: string[]
 }
 
-/** What `read()` hands the page: the live fields plus the dropdown suggestions. */
+/** What `read()` hands the page: the live fields plus immediately available suggestions. */
 export interface ProxySnapshot extends ProxyFields {
-  /** Active providers' hosts for the two fields' dropdowns. */
+  /** Clearly labelled fallback suggestions until the catalog is checked. */
   suggestions: HostSuggestion[]
 }
 
 /** Registration-side face the section entry injects into the page. */
 export interface ProxyFace {
-  /** Read the live `model-proxy` fields; null when the namespace is unreachable. */
+  /** Read settings without waiting for a possibly hung modelCatalog call. */
   read(): Promise<ProxySnapshot | null>
+  /** Enrich suggestions asynchronously; catalog failures time out to labelled fallbacks. */
+  refreshSuggestions(fields: ProxyFields): Promise<HostSuggestion[]>
   /** Write all three fields in one mutate transaction; throws when the write fails. */
   save(fields: ProxyFields): Promise<void>
 }
@@ -138,89 +149,87 @@ function revisionOf(res: unknown): number | null {
 /** Reject a write whose response envelope is missing or explicitly `ok:false`. */
 function unwrapWrite(res: unknown, what: string): void {
   if (res && typeof res === 'object' && (res as { ok?: unknown }).ok === true) return
-  const message = (res as { error?: { message?: string } } | null)?.error?.message
-  throw new Error(message ?? `${what} failed`)
+  const error = (res as { error?: { message?: string; code?: string } } | null)?.error
+  throw Object.assign(new Error(error?.message ?? `${what} failed`), { code: error?.code })
 }
 
-/**
- * One dropdown row: the hostname to proxy plus the providers that reach it
- * (two routes can share a host — the two DeepSeek adapters both land on
- * `api.deepseek.com` — hence a list).
- */
+/** A conflict is recoverable by rereading the latest revision, not blindly retrying. */
+export function isSettingsConflict(err: unknown): boolean {
+  const error = err as { code?: unknown; message?: unknown } | null
+  return /settings\/conflict|\bconflict\b|revision|版本冲突|版本已变/i.test(
+    `${typeof error?.code === 'string' ? error.code : ''} ${typeof error?.message === 'string' ? error.message : ''}`,
+  )
+}
+
+/** Labels distinguish chat-routable hosts from clearly marked degraded data. */
+export type SuggestionKind = 'routable' | 'configured' | 'saved' | 'fallback' | 'builtin'
+
+/** One hostname may correspond to several currently routable model groups. */
 export interface HostSuggestion {
-  /** Bare lowercase hostname to add to the list. */
   host: string
-  /** Provider names behind this host, for the row's muted label. */
   providers: string[]
+  /** Configured and builtin rows are *only* shown when the catalog is unavailable. */
+  kind: SuggestionKind
 }
 
-/** What the model catalog told us: routable routes and their display names. */
 interface ProviderCatalog {
+  available: boolean
   routes: string[]
   names: Map<string, string>
 }
 
+const UNAVAILABLE_CATALOG: ProviderCatalog = { available: false, routes: [], names: new Map() }
+const CATALOG_TIMEOUT_MS = 1500
+
 /**
- * Collect the hosts offered by the two host fields: the providers that are
- * actually active, not the whole catalog. Two sources, both of which matter:
- *
- *  - the routes the host currently serves models for
- *    (`session.modelCatalog`'s `routableProviders`) — this is what puts a
- *    plugin-registered provider such as the Codex subscription
- *    (`openai-codex` → chatgpt.com) or the official DeepSeek adapters in the
- *    list, and it is also the only source that knows a provider exists;
- *  - the profiles configured in `llm-pi-ai.providers`, each resolved to its own
- *    `baseURL` for a custom gateway (azapi/zenmux/…) or to the catalog endpoint
- *    of that route otherwise (kimi-coding/…).
- *
- * Once a route is known, its host comes from `providerEndpointHost`. Saved
- * entries are always included so nothing on the page becomes unremovable.
+ * Catalog success means precisely the routes available in the chat model picker,
+ * even if that list is empty. A configured pi-ai profile only supplies the
+ * matching route's actual baseURL; it is NOT a separate candidate in this case.
+ * When the catalog fails, configured endpoints and the builtin DeepSeek host
+ * remain available, but are visibly marked as unverified fallback suggestions.
  */
 function suggestionsOf(fields: ProxyFields, piAiValue: unknown, catalog: ProviderCatalog): HostSuggestion[] {
-  const byHost = new Map<string, Set<string>>()
+  const byHost = new Map<string, HostSuggestion>()
   const providers = (piAiValue as { providers?: Record<string, { baseURL?: unknown; displayName?: unknown }> } | null)?.providers
   const profileOf = (route: string): { baseURL?: unknown; displayName?: unknown } | undefined =>
     providers && typeof providers === 'object' ? providers[route] : undefined
-  const add = (route: string, label: string): void => {
-    const host = providerEndpointHost(route, profileOf(route)?.baseURL)
+  const addRoute = (route: string, kind: 'routable' | 'configured'): void => {
+    const profile = profileOf(route)
+    const host = providerEndpointHost(route, profile?.baseURL)
     if (host === undefined) return
-    const names = byHost.get(host) ?? new Set<string>()
-    names.add(label)
-    byHost.set(host, names)
-  }
-  for (const route of catalog.routes) {
-    const configured = profileOf(route)?.displayName
+    const configured = profile?.displayName
     const label = typeof configured === 'string' && configured.length > 0
       ? configured
       : catalog.names.get(route) ?? route
-    add(route, label)
-  }
-  if (providers && typeof providers === 'object') {
-    for (const [route, profile] of Object.entries(providers)) {
-      const host = providerEndpointHost(route, profile?.baseURL)
-      if (host === undefined || byHost.has(host)) continue
-      const configured = profile?.displayName
-      byHost.set(host, new Set([typeof configured === 'string' && configured.length > 0 ? configured : route]))
+    const existing = byHost.get(host)
+    if (existing) {
+      if (!existing.providers.includes(label)) existing.providers.push(label)
+    } else {
+      byHost.set(host, { host, kind, providers: [label] })
     }
   }
-  // Without the catalog (an older host, or the call failing) the official
-  // adapter is still the one provider this deployment always has.
-  if (catalog.routes.length === 0 && !byHost.has(DEFAULT_DEEPSEEK_HOST)) byHost.set(DEFAULT_DEEPSEEK_HOST, new Set(['DeepSeek']))
-  // Already-saved entries stay listed (with no provider label) so they can be
-  // seen and removed from the page that owns them.
-  const addList = (list: unknown): void => {
-    if (!Array.isArray(list)) return
-    for (const host of list) {
-      if (typeof host !== 'string') continue
-      const normalized = normalizeHostEntry(host)
-      if (normalized !== undefined && !byHost.has(normalized)) byHost.set(normalized, new Set())
+  if (catalog.available) {
+    for (const route of catalog.routes) addRoute(route, 'routable')
+  } else {
+    if (providers && typeof providers === 'object') {
+      for (const route of Object.keys(providers)) addRoute(route, 'configured')
+    }
+    if (!byHost.has(DEFAULT_DEEPSEEK_HOST)) {
+      byHost.set(DEFAULT_DEEPSEEK_HOST, { host: DEFAULT_DEEPSEEK_HOST, kind: 'fallback', providers: ['DeepSeek'] })
     }
   }
-  addList(fields.proxyHosts)
-  addList(fields.excludeHosts)
-  return [...byHost.entries()]
-    .map(([host, names]) => ({ host, providers: [...names] }))
-    .sort((left, right) => left.host.localeCompare(right.host))
+  // Author-supplied hosts are selectable even when they are not model API endpoints.
+  // This is a candidate list only, never an implicit routing union.
+  for (const host of BUILTIN_PROXY_HOSTS) {
+    if (!byHost.has(host)) byHost.set(host, { host, kind: 'builtin', providers: ['作者内置'] })
+  }
+  // The settings snapshot, not the live chips, owns these suggestions. A saved
+  // custom host must reappear after its chip is removed, even after catalog refresh.
+  for (const entry of [...fields.proxyHosts, ...fields.excludeHosts]) {
+    const host = normalizeHostEntry(entry)
+    if (host !== undefined && !byHost.has(host)) byHost.set(host, { host, kind: 'saved', providers: [] })
+  }
+  return [...byHost.values()].sort((left, right) => left.host.localeCompare(right.host))
 }
 
 /** The client-side `remote.session` face this page reads for routable routes. */
@@ -228,37 +237,43 @@ interface SessionRemoteLike {
   modelCatalog?: () => Promise<unknown>
 }
 
-/**
- * Ask the host which provider routes currently serve models, and what they are
- * called. This is the only way to see a provider another plugin registered (the
- * Codex subscription adds `openai-codex` straight to the pi-ai adapter, so it
- * never appears in the `llm-pi-ai` settings document).
- * @param ctx - the browser plugin context.
- * @returns the routable routes and their names; empty when the call fails.
- */
+/** A malformed/failed catalog is NOT an authoritative empty routable list. */
 async function providerCatalogOf(ctx: ClientContext): Promise<ProviderCatalog> {
-  const empty: ProviderCatalog = { routes: [], names: new Map() }
   const remote = serviceOf(ctx, 'remote.session') as SessionRemoteLike | undefined
-  if (!remote || typeof remote.modelCatalog !== 'function') return empty
+  if (!remote || typeof remote.modelCatalog !== 'function') return UNAVAILABLE_CATALOG
   try {
     const res = await remote.modelCatalog()
     const envelope = res as { ok?: unknown; value?: unknown } | null
-    const value = envelope && envelope.ok === true ? envelope.value : envelope?.value ?? res
+    if (envelope?.ok === false) return UNAVAILABLE_CATALOG
+    const value = envelope?.ok === true ? envelope.value : envelope?.value ?? res
     const catalog = value as { routableProviders?: unknown; groups?: unknown } | null
-    const routes = Array.isArray(catalog?.routableProviders)
-      ? catalog.routableProviders.filter((route): route is string => typeof route === 'string')
-      : []
+    if (!Array.isArray(catalog?.routableProviders)) return UNAVAILABLE_CATALOG
+    const routes = catalog.routableProviders.filter((route): route is string => typeof route === 'string')
     const names = new Map<string, string>()
-    if (Array.isArray(catalog?.groups)) {
+    if (Array.isArray(catalog.groups)) {
       for (const group of catalog.groups) {
         const row = group as { id?: unknown; name?: unknown } | null
         if (typeof row?.id === 'string' && typeof row.name === 'string' && row.name.length > 0) names.set(row.id, row.name)
       }
     }
-    return { routes, names }
+    return { available: true, routes, names }
   } catch {
-    // A failed catalog call degrades to the configured-provider list.
-    return empty
+    return UNAVAILABLE_CATALOG
+  }
+}
+
+/** Finite wait: a never-settling modelCatalog must never hold the page hostage. */
+async function boundedProviderCatalogOf(ctx: ClientContext): Promise<ProviderCatalog> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      providerCatalogOf(ctx),
+      new Promise<ProviderCatalog>(resolve => {
+        timeout = setTimeout(() => { resolve(UNAVAILABLE_CATALOG) }, CATALOG_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
   }
 }
 
@@ -268,7 +283,7 @@ function fieldsOf(value: unknown): ProxyFields {
   const listOf = (input: unknown): string[] => (Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : [])
   return {
     proxy: typeof row.proxy === 'string' ? row.proxy : '',
-    proxyHosts: listOf(row.proxyHosts),
+    proxyHosts: row.proxyHosts === undefined ? [...BUILTIN_PROXY_HOSTS] : listOf(row.proxyHosts),
     excludeHosts: listOf(row.excludeHosts),
   }
 }
@@ -282,6 +297,7 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
   // Revision read by the last successful describe, replayed on save as the
   // optimistic-concurrency check so a stale page cannot overwrite a newer one.
   let describedRevision: number | null = null
+  let piAiValue: unknown
   return {
     async read(): Promise<ProxySnapshot | null> {
       const api = settingsApiOf(ctx)
@@ -295,11 +311,14 @@ export function createProxyFace(ctx: ClientContext): ProxyFace {
       const revision = own.revision
       describedRevision = typeof revision === 'number' && Number.isInteger(revision) ? revision : null
       const fields = fieldsOf(own.value)
-      const piAi = rows.find(row => row?.ns === PI_AI_NS)
-      // The catalog call is independent of the settings read; both feed the
-      // suggestion list, and a failure on either side degrades to the other.
-      const catalog = await providerCatalogOf(ctx)
-      return { ...fields, suggestions: suggestionsOf(fields, piAi?.value, catalog) }
+      piAiValue = rows.find(row => row?.ns === PI_AI_NS)?.value
+      // Render the actual settings immediately. Fallback rows are labelled as
+      // unverified until refreshSuggestions resolves the chat model catalog.
+      return { ...fields, suggestions: suggestionsOf(fields, piAiValue, UNAVAILABLE_CATALOG) }
+    },
+    async refreshSuggestions(fields: ProxyFields): Promise<HostSuggestion[]> {
+      const catalog = await boundedProviderCatalogOf(ctx)
+      return suggestionsOf(fields, piAiValue, catalog)
     },
     async save(fields: ProxyFields): Promise<void> {
       const api = settingsApiOf(ctx)

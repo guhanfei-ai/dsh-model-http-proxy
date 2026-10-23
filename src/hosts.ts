@@ -2,6 +2,11 @@
  * Browser-safe hostname helpers shared by the Host half (routing) and the
  * browser card (suggestions). No node imports, so either bundle can inline
  * this module without dragging in `undici`.
+ *
+ * Everything here is about *domains*, not providers: the plugin decides per
+ * request URL which hosts travel through the proxy. Two hosts that happen to
+ * share a domain (a model API and a web search on `chatgpt.com`, say) are
+ * therefore routed together — that is a property of domain routing, not a bug.
  * @module dsh-model-http-proxy/hosts
  */
 
@@ -9,73 +14,11 @@
 export const DEFAULT_DEEPSEEK_HOST = 'api.deepseek.com'
 
 /**
- * Default model-API hostnames pi-ai's built-in providers use, so auto mode
- * proxies a catalog route (e.g. `google`) even when its profile names no
- * `baseURL`. Exact hostname matches; see {@link DEFAULT_MODEL_HOST_SUFFIXES}
- * for region- or resource-templated endpoints. This mirrors the endpoints the
- * installed pi-ai catalog ships (`builtinProviders()`); a pi-ai release that
- * adds a provider with a new default endpoint needs its host added here.
- */
-export const DEFAULT_MODEL_HOSTS: readonly string[] = [
-  'ai-gateway.vercel.sh',
-  'api.ant-ling.com',
-  'api.anthropic.com',
-  'api.cerebras.ai',
-  'api.cloudflare.com',
-  'api.fireworks.ai',
-  'api.groq.com',
-  'api.individual.githubcopilot.com',
-  'api.kimi.com',
-  'api.minimaxi.com',
-  'api.minimax.io',
-  'api.mistral.ai',
-  'api.moonshot.ai',
-  'api.moonshot.cn',
-  'api.openai.com',
-  'api.together.ai',
-  'api.x.ai',
-  'api.xiaomimimo.com',
-  'api.z.ai',
-  'chatgpt.com',
-  'gateway.ai.cloudflare.com',
-  'generativelanguage.googleapis.com',
-  'inference.baseten.co',
-  'integrate.api.nvidia.com',
-  'open.bigmodel.cn',
-  'openrouter.ai',
-  'router.huggingface.co',
-  'token-plan-ams.xiaomimimo.com',
-  'token-plan-cn.xiaomimimo.com',
-  'token-plan-sgp.xiaomimimo.com',
-  'token-plan.ap-southeast-1.maas.aliyuncs.com',
-  'token-plan.cn-beijing.maas.aliyuncs.com',
-]
-
-/**
- * Default suffixes for templated pi-ai endpoints: `google-vertex` resolves its
- * catalog baseURL from `https://{location}-aiplatform.googleapis.com` (the
- * actual request lands on `us-central1-aiplatform.googleapis.com` and
- * siblings), and `azure-openai-responses` builds
- * `https://{resource}.openai.azure.com`. A suffix entry matches the bare
- * domain, its subdomains, and its hyphen-joined region hosts.
- */
-export const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[] = [
-  '.aiplatform.googleapis.com',
-  '.openai.azure.com',
-]
-
-/**
  * The endpoint each pi-ai catalog route uses when its profile names no
- * `baseURL` of its own. Mirrors `builtinProviders()` of the installed catalog
- * (pi-ai 1.3.0); routes whose endpoint is built per request (Bedrock, Azure,
- * Vertex, the Cloudflare gateways, opencode, typesafe) carry no entry and
- * resolve to nothing here — a configured profile of that kind simply does not
- * contribute a suggestion.
- *
- * The settings page reads this to show the hosts of the providers that are
- * actually configured: a catalog route such as `kimi-coding` names no
- * `baseURL`, so without this table its endpoint would be unknowable in the
- * browser (the catalog itself is a Host-only dependency).
+ * `baseURL` of its own. Mirrors the routes of the installed pi-ai catalog;
+ * routes whose endpoint is built per request (Bedrock, Azure, Vertex, the
+ * Cloudflare gateways, opencode, typesafe) carry no entry here and are covered
+ * by {@link DEFAULT_MODEL_HOST_SUFFIXES} instead.
  */
 export const PROVIDER_ENDPOINTS: Readonly<Record<string, string>> = {
   'ant-ling': 'https://api.ant-ling.com/v1',
@@ -118,6 +61,94 @@ export const PROVIDER_ENDPOINTS: Readonly<Record<string, string>> = {
 }
 
 /**
+ * Catalog endpoints that are not the sole endpoint of one pi-ai route, plus
+ * the hosts whose API shares a domain with non-model traffic.
+ */
+const EXTRA_MODEL_HOSTS: readonly string[] = [
+  // `cloudflare` builds its URL per request, so it has no PROVIDER_ENDPOINTS row.
+  'api.cloudflare.com',
+  'gateway.ai.cloudflare.com',
+  // The ChatGPT-subscription adapter refreshes its OAuth token and reads quota
+  // on these two hosts. `chatgpt.com` is a PROVIDER_ENDPOINTS row, but the auth
+  // host is not a model endpoint and used to be missing: with the OS-wide proxy
+  // off, a token refresh went out direct and failed, which surfaced as
+  // "ChatGPT subscription authorization failed" rather than as a routing gap.
+  'auth.openai.com',
+]
+
+/**
+ * Default model-API hostnames used to build auto mode. Derived from
+ * {@link PROVIDER_ENDPOINTS} rather than maintained as a second hand-written
+ * list, so adding a provider endpoint can no longer leave auto mode behind —
+ * the drift that made the `meta` endpoint suggest a host auto mode never
+ * proxied.
+ */
+export const DEFAULT_MODEL_HOSTS: readonly string[] = [...new Set([
+  ...Object.values(PROVIDER_ENDPOINTS).map(endpoint => hostnameOf(endpoint)),
+  ...EXTRA_MODEL_HOSTS,
+])].sort()
+
+/**
+ * Templated endpoints, written as glob entries. `*` matches any run of
+ * characters except a dot, so:
+ *
+ * - `*-aiplatform.googleapis.com` covers `us-central1-aiplatform.googleapis.com`
+ *   and its siblings (Vertex builds the label into the hostname);
+ * - `*.openai.azure.com` covers `{resource}.openai.azure.com`.
+ *
+ * A leading-dot entry would NOT cover the Vertex shape: those hosts are not
+ * subdomains of `aiplatform.googleapis.com`.
+ */
+export const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[] = [
+  '*.aiplatform.googleapis.com',
+  '*.openai.azure.com',
+]
+
+/** Author-supplied defaults, seeded only when proxyHosts is absent, never merged on read. */
+export const BUILTIN_PROXY_HOSTS: readonly string[] = ['auth.openai.com']
+
+/** Exact domains match only themselves; only *.domain opts into suffix matching. */
+export function hostMatches(hostname: string, entry: string): boolean {
+  const host = canonicalHost(hostname)
+  const normalized = normalizeHostEntry(entry)
+  if (normalized === undefined) return false
+  if (normalized.startsWith('*.')) {
+    const domain = normalized.slice(2)
+    return host === domain || host.endsWith(`.${domain}`)
+  }
+  return host === normalized
+}
+
+/** Whether any entry in a set matches the hostname. */
+export function matchesAny(hostname: string, entries: ReadonlySet<string>): boolean {
+  for (const entry of entries) {
+    if (hostMatches(hostname, entry)) return true
+  }
+  return false
+}
+
+/**
+ * Whether a request to `hostname` should travel through the proxy.
+ *
+ * Exclusions win unconditionally: a host matched by both lists stays direct.
+ * That precedence is applied here rather than by removing the host from the
+ * include set, because an include suffix can still cover an exact exclusion
+ * (`*.example.com` includes vs `api.example.com` excludes).
+ * @param hostname - the request hostname.
+ * @param includes - normalized hosts to proxy.
+ * @param excludes - normalized hosts that must stay direct.
+ * @returns whether to route through the proxy.
+ */
+export function isRoutedHost(
+  hostname: string,
+  includes: ReadonlySet<string>,
+  excludes: ReadonlySet<string>,
+): boolean {
+  if (matchesAny(hostname, excludes)) return false
+  return matchesAny(hostname, includes)
+}
+
+/**
  * Resolve one configured pi-ai provider profile to the host its requests land
  * on: the profile's own `baseURL` when it sets one (custom gateways such as
  * `azapi` do), else the catalog endpoint of that route, else nothing.
@@ -145,62 +176,178 @@ export function providerEndpointHost(route: string, baseURL?: unknown): string |
 }
 
 /**
- * Extract the hostname from an absolute URL string or `URL`.
+ * Extract the hostname from an absolute URL string or `URL`, in the canonical
+ * form routing compares against: lowercase, punycode for IDNs, and no trailing
+ * root dot.
  * @param value - the URL to read.
- * @returns the lowercase hostname.
+ * @returns the canonical hostname.
  */
 export function hostnameOf(value: string | URL): string {
-  return value instanceof URL ? value.hostname : new URL(value).hostname
+  const host = value instanceof URL ? value.hostname : new URL(value).hostname
+  return canonicalHost(host)
 }
 
-/** Count one-character occurrences; enough for the `:` scan below. */
-function countOf(value: string, needle: string): number {
-  let count = 0
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === needle) count++
+/** Lowercase, punycode, and strip the trailing root dot (`api.example.com.`). */
+function canonicalHost(raw: string): string {
+  const lowered = raw.toLowerCase()
+  // A trailing dot is the DNS root: `api.example.com.` is the same host, but
+  // `new URL` keeps the dot, so an un-normalized entry would never match.
+  const withoutRoot = lowered.endsWith('.') && lowered.length > 1 ? lowered.slice(0, -1) : lowered
+  if (withoutRoot.includes('*')) return withoutRoot
+  try {
+    // Round-tripping through URL applies IDNA (例子.测试 → xn--…), lowercases,
+    // and rejects hosts that are not valid hostnames at all.
+    return new URL(`http://${withoutRoot}`).hostname
+  } catch {
+    return withoutRoot
   }
-  return count
 }
 
 /**
- * Normalize a user-entered host entry to the form `shouldProxy` matches
- * against (`new URL(url).hostname`). Accepts a plain hostname, `host:port`,
- * a bracketed or bare IPv6 literal, an absolute URL (scheme, port, and path
- * are all stripped), or a suffix entry (`*.example.com` or `.example.com`,
- * both kept as `.example.com`). Returns undefined when nothing usable
- * remains.
- * @param entry - a raw `proxyHosts` / `excludeHosts` entry.
- * @returns the normalized entry, or undefined for an empty/invalid entry.
+ * Canonicalize a rule while retaining its explicit *. prefix. Legacy .domain
+ * and other wildcard spellings are rejected, not silently expanded. URL/port
+ * inputs remain exact-host conveniences; they cannot contain a wildcard.
  */
 export function normalizeHostEntry(entry: string): string | undefined {
-  const trimmed = entry.trim()
-  if (trimmed.length === 0) return undefined
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
-    try {
-      return new URL(trimmed).hostname.toLowerCase()
-    } catch {
-      return undefined
+  const text = entry.trim()
+  if (!text || /\s/u.test(text) || text.startsWith('.')) return undefined
+  const suffix = text.startsWith('*.')
+  let raw = suffix ? text.slice(2) : text
+  if (!raw || raw.includes('*') || raw.startsWith('.') || raw.includes('..')) return undefined
+  if (suffix && /[/:?#@\\]/u.test(raw)) return undefined
+  try {
+    let url: URL
+    if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(raw)) {
+      url = new URL(raw)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+    } else {
+      if (raw.includes('@') || /[/?#\\]/u.test(raw)) return undefined
+      if (!raw.startsWith('[') && (raw.match(/:/gu)?.length ?? 0) > 1) raw = `[${raw}]`
+      url = new URL(`http://${raw}`)
     }
+    const host = canonicalHost(url.hostname)
+    if (!host || host.startsWith('.') || host.includes('..') || host.includes('*')) return undefined
+    if (suffix && (host.startsWith('[') || /^\d+(?:\.\d+){3}$/u.test(host))) return undefined
+    if (!host.startsWith('[') && !host.split('.').every(label => /^[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?$/u.test(label))) return undefined
+    return suffix ? `*.${host}` : host
+  } catch {
+    return undefined
   }
-  const beforePath = trimmed.split('/')[0] ?? ''
-  let hostPart: string
-  if (beforePath.startsWith('[')) {
-    // A bracketed IPv6 literal; a `:port` may follow the bracket.
-    const close = beforePath.indexOf(']')
-    hostPart = close === -1 ? beforePath : beforePath.slice(0, close + 1)
-  } else if (countOf(beforePath, ':') === 1) {
-    // Exactly one colon reads as `host:port`; a bare IPv6 literal has several.
-    hostPart = beforePath.split(':')[0] ?? ''
-  } else {
-    hostPart = beforePath
+}
+
+/** The three editable fields, structurally (client and Host halves share it). */
+export interface HostLists {
+  proxy: string
+  proxyHosts: string[]
+  excludeHosts: string[]
+}
+
+/** A hostname plus the labels that explain where it came from. */
+export interface HostChoiceLike {
+  host: string
+  providers: string[]
+}
+
+/**
+ * Commit free-typed entries into one list, refusing anything the opposite list
+ * already owns. The same hostname cannot be both proxied and excluded, and a
+ * silently dropped keystroke is worse than a refusal the page can explain.
+ * @param selected - the list being edited.
+ * @param opposite - the other list; its hosts are refused.
+ * @param text - one or more entries typed by the user.
+ * @returns the new list plus the entries refused as conflicts.
+ */
+export function addHostEntries(
+  selected: readonly string[],
+  opposite: readonly string[],
+  text: string,
+): { hosts: string[]; conflicts: string[] } {
+  const blocked = new Set(opposite.map(host => normalizeHostEntry(host)).filter((host): host is string => host !== undefined))
+  const hosts = [...selected]
+  const conflicts: string[] = []
+  for (const part of text.split(/[,，\s]+/).map(item => item.trim()).filter(item => item.length > 0)) {
+    const normalized = normalizeHostEntry(part)
+    if (normalized === undefined) continue
+    if (blocked.has(normalized)) {
+      if (!conflicts.includes(part)) conflicts.push(part)
+      continue
+    }
+    if (!hosts.some(existing => normalizeHostEntry(existing) === normalized)) hosts.push(part)
   }
-  let bare = hostPart.toLowerCase()
-  if (bare.length === 0) return undefined
-  // Bare IPv6 literals take the bracketed form URL hostnames carry.
-  if (bare.includes(':') && !bare.startsWith('[')) bare = `[${bare}]`
-  // `*.example.com` and `.example.com` are the same suffix entry.
-  if (bare.startsWith('*.')) bare = bare.slice(1)
-  // URL hostnames never carry a trailing dot; drop it so the entry matches.
-  if (bare.endsWith('.')) bare = bare.slice(0, -1)
-  return bare.length > 0 ? bare : undefined
+  return { hosts, conflicts }
+}
+
+/**
+ * Suggestions still worth offering: not already committed on either side, and
+ * matching the typed query by host or by provider label.
+ * @param suggestions - the candidate hosts.
+ * @param selected - the list being edited.
+ * @param opposite - the other list.
+ * @param query - what the user has typed so far.
+ * @returns the filtered candidates, in their original order.
+ */
+export function visibleHostSuggestions<T extends HostChoiceLike>(
+  suggestions: readonly T[],
+  selected: readonly string[],
+  opposite: readonly string[],
+  query: string,
+): T[] {
+  const taken = new Set([...selected, ...opposite]
+    .map(host => normalizeHostEntry(host))
+    .filter((host): host is string => host !== undefined))
+  const needle = query.trim().toLowerCase()
+  return suggestions.filter(option => !taken.has(option.host) && (
+    needle.length === 0
+    || option.host.includes(needle)
+    || option.providers.some(name => name.toLowerCase().includes(needle))
+  ))
+}
+
+/** Hosts present on both lists — the state the page refuses to save. */
+export function overlappingHosts(fields: HostLists): string[] {
+  const proxied = new Set(fields.proxyHosts
+    .map(host => normalizeHostEntry(host))
+    .filter((host): host is string => host !== undefined))
+  return [...new Set(fields.excludeHosts
+    .map(host => normalizeHostEntry(host))
+    .filter((host): host is string => host !== undefined))]
+    .filter(host => proxied.has(host))
+}
+
+/**
+ * Merge a local draft onto a freshly read document after a revision conflict.
+ *
+ * Fields the user did not touch take the latest value. Fields only the user
+ * changed keep the draft. Fields both sides changed are reported as conflicts
+ * and left holding the draft, so nothing is written until the page asks.
+ * @param base - the document the draft was based on.
+ * @param draft - the user's edits.
+ * @param latest - the document just read from the host.
+ * @returns the rebased fields plus the field names that genuinely conflict.
+ */
+export function rebaseProxyFields(
+  base: HostLists,
+  draft: HostLists,
+  latest: HostLists,
+): { fields: HostLists; conflicts: (keyof HostLists)[] } {
+  const same = (key: keyof HostLists, left: HostLists, right: HostLists): boolean =>
+    key === 'proxy' ? left.proxy === right.proxy : sameHostLists(left[key], right[key])
+  const fields: HostLists = {
+    proxy: latest.proxy,
+    proxyHosts: [...latest.proxyHosts],
+    excludeHosts: [...latest.excludeHosts],
+  }
+  const conflicts: (keyof HostLists)[] = []
+  for (const key of ['proxy', 'proxyHosts', 'excludeHosts'] as const) {
+    if (same(key, draft, base)) continue
+    if (!same(key, latest, base) && !same(key, latest, draft)) conflicts.push(key)
+    if (key === 'proxy') fields.proxy = draft.proxy
+    else fields[key] = [...draft[key]]
+  }
+  return { fields, conflicts }
+}
+
+/** Order-free list compare: reordering chips is not an edit. */
+function sameHostLists(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(host => right.includes(host))
 }

@@ -7,8 +7,8 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 发布流程（三步走）：
 #
-#   ./deploy.sh release  --->  锁版本：交互输入版本号，自动完成
-#                              递增版本、提交、打tag、推送GitHub（仅限main分支）
+#   ./deploy.sh release  --->  锁版本：交互输入新版本，完成验证、提交、打tag、推送GitHub
+#                              已存在的 npm 版本或本地/远程 tag 不可重锁（仅限main分支）
 #
 #   ./deploy.sh build    --->  打包：验证代码 + npm pack，产物输出到 dist/
 #                              （包含 TypeScript 与客户端构建）
@@ -62,13 +62,6 @@ guard_main() {
   [[ "$branch" == "$RELEASE_BRANCH" ]] || die "发布相关命令仅允许在 $RELEASE_BRANCH 分支执行（当前分支：${branch}）"
 }
 
-# tag 守卫：确认当前版本已通过 release 锁定在 HEAD 上
-guard_tag() {
-  git tag --points-at HEAD | grep -Fxq "$GIT_TAG" || {
-    die "当前HEAD上不存在tag ${GIT_TAG}，请先执行 ./deploy.sh release 锁定版本"
-  }
-}
-
 # 凭证预检：发布链路的终点是 npm + GitHub Release，双凭证在链路最前置的
 # 位置统一校验，避免版本已锁、tag 已推、包已打好之后才发现未登录白跑一遍。
 # （npm whoami 会真实请求 registry，token 过期/失效同样能提前暴露）
@@ -79,25 +72,91 @@ guard_credentials() {
 }
 
 verify_and_install() {
-  # 本仓使用 pnpm 锁（pnpm-lock.yaml）；无 native 准备与 check:package 步骤。
-  pnpm install --frozen-lockfile
-  pnpm run typecheck
-  pnpm run build
+  # 仅允许 packageManager 固定的 pnpm 9.15.9 + frozen lockfile；本机没有 pnpm 时
+  # 仍可直接 npm run verify 使用已有 node_modules 做只读验证（不等于发布构建）。
+  if command -v pnpm >/dev/null 2>&1; then
+    [[ "$(pnpm --version)" == '9.15.9' ]] || die '请使用 packageManager 指定的 pnpm@9.15.9'
+    pnpm install --frozen-lockfile
+  elif command -v corepack >/dev/null 2>&1; then
+    corepack pnpm install --frozen-lockfile
+  else
+    die '缺少 pnpm@9.15.9/corepack；发布必须从 pnpm-lock.yaml 安装依赖，本地可先执行 npm run verify'
+  fi
+  npm run verify
 }
 
-# 发布同一版本的已验证产物，拒绝旧包、错包及构建后漂移的 bundle。
+# 工作区必须与 HEAD 完全一致：发布产物只能来自被 tag 固定的提交，
+# lib/ 与 dist/ 由 .gitignore 忽略，构建不再污染工作区。
+guard_clean() {
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die '工作区存在未提交变更，请先提交或清理'
+}
+
+# 禁止本地 tag 与远端 tag 指向不同对象，或同一版本号指向另一个提交。
+# 直接读取远端 refs/tags/vX.Y.Z，不能只依赖本地缓存或 HEAD 上有一个同名 tag。
+guard_tag() {
+  local head tag_commit local_tag remote_tag
+  head="$(git rev-parse HEAD)"
+  tag_commit="$(git rev-parse -q --verify "refs/tags/$GIT_TAG^{commit}")" || die "缺少本地 tag $GIT_TAG"
+  [[ "$head" == "$tag_commit" ]] || die "本地 tag $GIT_TAG 未指向当前 HEAD"
+  local_tag="$(git rev-parse --verify "refs/tags/$GIT_TAG")"
+  remote_tag="$(git ls-remote --exit-code --refs origin "refs/tags/$GIT_TAG")" || die "远端缺少 tag $GIT_TAG，或无法读取 origin"
+  [[ "$remote_tag" == "$local_tag"$'\t'"refs/tags/$GIT_TAG" ]] || die "远端 tag $GIT_TAG 与当前 tag 不一致"
+}
+
+# 读 npm 官方源的版本列表；查询失败必须失败关闭，绝不能误认为「尚未发布」。
+npm_version_state() {
+  local versions
+  versions="$(npm --registry "$NPM_REGISTRY" view "$NPM_PKG" versions --json)" || die '无法读取 npm 版本列表，已中止以避免同版本不同字节'
+  printf '%s' "$versions" | node -e '
+    let value
+    try { value = JSON.parse(require("node:fs").readFileSync(0, "utf8")) }
+    catch { process.exit(1) }
+    if (typeof value === "string") value = [value]
+    if (!Array.isArray(value) || !value.every(v => typeof v === "string")) process.exit(1)
+    process.stdout.write(value.includes(process.argv[1]) ? "published" : "unpublished")
+  ' "$1" || die 'npm 版本列表格式异常，已中止'
+}
+
+# npm 的 dist.integrity 是发布包原始 tarball 的 SHA512，续发 GitHub Release 前必须逐字节匹配。
+check_npm_integrity() {
+  local integrity
+  integrity="$(npm --registry "$NPM_REGISTRY" view "${NPM_PKG}@${VERSION}" dist.integrity --json)" || die '无法读取 npm 安装包完整性信息'
+  node - "$1" "$integrity" <<'NODE' || die '当前产物与 npm 已发布包字节不同：禁止创建同版本 GitHub Release'
+const assert = require('node:assert/strict')
+const { readFileSync } = require('node:fs')
+const { createHash } = require('node:crypto')
+const [archive, json] = process.argv.slice(2)
+const published = JSON.parse(json)
+assert.match(published, /^sha512-[A-Za-z0-9+/]+={0,2}$/)
+const local = 'sha512-' + createHash('sha512').update(readFileSync(archive)).digest('base64')
+assert.equal(local, published)
+NODE
+}
+
+# 逐个核对 tar 中的每个文件，不只检查入口 bundle；tar 缺失或漂移都拒绝发布。
 check_archive() {
-  node --input-type=module - "$1" "$NPM_PKG" "$VERSION" <<'NODE' || die '安装包版本或构建产物不一致，请重新执行 ./deploy.sh build'
-import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+  node - "$1" "$NPM_PKG" "$VERSION" <<'NODE' || die '安装包版本或构建产物不一致，请重新执行 ./deploy.sh build'
+const assert = require('node:assert/strict')
+const { readFileSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
 const [archive, name, version] = process.argv.slice(2)
 const member = (path) => execFileSync('tar', ['-xOf', archive, `package/${path}`])
 const manifest = JSON.parse(member('package.json').toString())
 assert.equal(manifest.name, name, '安装包名称不匹配')
 assert.equal(manifest.version, version, '安装包版本不匹配')
-for (const path of ['lib/index.js', 'lib/client.js']) {
-  assert(member(path).equals(readFileSync(path)), `安装包中的 ${path} 与当前构建不一致`)
+const files = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' })
+  .trim().split('\n').filter(path => path && !path.endsWith('/'))
+for (const path of ['package.json', 'lib/index.js', 'lib/client.js', 'lib/types/index.d.ts', 'lib/types/client/index.d.ts', 'cordis.patch.yml']) {
+  assert(files.includes(`package/${path}`), `安装包缺少 ${path}`)
+}
+for (const path of files) {
+  assert(path.startsWith('package/') && !path.includes('..'), `非法安装包路径 ${path}`)
+  const localPath = path.slice('package/'.length)
+  if (localPath === 'package.json') {
+    assert.deepEqual(manifest, JSON.parse(readFileSync(localPath, 'utf8')), '安装包清单与 tag 不一致')
+  } else {
+    assert(member(localPath).equals(readFileSync(localPath)), `安装包中的 ${localPath} 与当前文件不一致`)
+  }
 }
 NODE
 }
@@ -134,8 +193,8 @@ cmd_release() {
   need_cmd git node npm gh
   guard_main
 
-  # 工作区必须干净（版本辐射要产生唯一明确的release commit）
-  [[ -z "$(git status --porcelain)" ]] || die "工作区存在未提交变更，请先提交或stash"
+  # 工作区必须完全干净（版本辐射要产生唯一明确的 release commit）。
+  guard_clean
 
   # release 会打 tag 并推送远端，是链路里最难回退的一步：先完成凭证预检
   guard_credentials
@@ -147,7 +206,7 @@ cmd_release() {
   # 解析新版本号：参数指定 或 交互输入；支持 patch/minor/major 或显式 x.y.z，回车默认 patch
   local input="${1:-}"
   if [[ -z "$input" ]]; then
-    printf '当前版本：%s\n请输入要发布的版本号（如 0.3.3 / 0.4.0，重锁可输入当前版本号，回车默认 patch）：' "$VERSION"
+    printf '当前版本：%s\n请输入新版本号（如 0.3.3 / 0.4.0，回车默认 patch）：' "$VERSION"
     read -r input || true
     input="${input:-patch}"
   fi
@@ -168,43 +227,28 @@ cmd_release() {
   esac
   local next_tag="v$next"
 
-  # 重锁检测：目标tag是否已存在于远端
-  local relock="false"
-  if [[ -n "$(git ls-remote --tags origin "refs/tags/$next_tag")" ]]; then
-    relock="true"
-    if gh release view "$next_tag" >/dev/null 2>&1; then
-      die "$next_tag 已发布过 GitHub Release，请递增新版本号"
-    fi
-  fi
+  # 已发布的版本不可重锁：npm 版本不可变，force 移动 tag 会让 npm 与
+  # GitHub Release 上的同版本字节不同。任何一边已存在都必须换新版本号。
+  [[ -z "$(git ls-remote --tags origin "refs/tags/$next_tag")" ]] || die "$next_tag 已存在于远端；已发布版本不可重锁，请递增版本号"
+  git rev-parse -q --verify "refs/tags/$next_tag" >/dev/null && die "本地已存在 tag $next_tag；请先确认它是否已发布"
+  [[ "$(npm_version_state "$next")" == 'unpublished' ]] || die "npm 已发布 ${NPM_PKG}@${next}；已发布版本不可重锁，请递增版本号"
 
-  # 确认
-  if [[ "$relock" == "true" ]]; then
-    confirm "确认重锁 ${next_tag}（tag 将强制移动到当前HEAD）？[y/N] " || { printf '已取消\n'; exit 0; }
-  else
-    confirm "确认发布 ${next_tag}（当前 v$VERSION → ${next_tag}）？[y/N] " || { printf '已取消\n'; exit 0; }
-  fi
+  confirm "确认发布 ${next_tag}（当前 v${VERSION} → ${next_tag}）？[y/N] " || { printf '已取消\n'; exit 0; }
 
   # 发布前完整验证
   verify_and_install
 
-  # 版本辐射 + 提交 + 打tag（next == VERSION 时为纯重锁：跳过npm version，仅移动tag）
+  # 版本辐射 + 提交 + 打tag（npm version 自带提交与 tag，不强制覆盖）
   if [[ "$next" != "$VERSION" ]]; then
-    git tag -d "$next_tag" >/dev/null 2>&1 || true
     printf '>> 递增版本并提交：%s\n' "$next_tag"
     npm --cache "$NPM_CACHE" version "$next" -m 'release: v%s'
-  else
-    printf '>> 版本号无变化，跳过提交\n'
   fi
-  git tag -af "$next_tag" -m "release: $next_tag"
+  git rev-parse -q --verify "refs/tags/$next_tag" >/dev/null \
+    || git tag -a "$next_tag" -m "release: $next_tag"
 
-  # 推送 main 和 tag（重锁时tag会强制更新）
+  # 原子推送分支与 tag：要么都成功，要么都不留下
   printf '>> 推送 %s 和 tag 到远程\n' "$RELEASE_BRANCH"
-  if [[ "$relock" == "true" ]]; then
-    git push origin "$RELEASE_BRANCH"
-    git push -f origin "refs/tags/$next_tag"
-  else
-    git push --atomic origin "$RELEASE_BRANCH" "$next_tag"
-  fi
+  git push --atomic origin "$RELEASE_BRANCH" "refs/tags/$next_tag"
 
   banner "版本已锁定：$next_tag"
   printf '>> 下一步执行 ./deploy.sh build 和 ./deploy.sh publish 开始打包和分发\n'
@@ -250,11 +294,13 @@ cmd_publish() {
   local asset="dist/${NPM_PKG}-${VERSION}.tgz"
   [[ -f "$asset" ]] || die "缺少打包产物 $asset，请先执行 ./deploy.sh build"
 
-  # npm 版本不可变：已发布过的版本直接跳过 npm 步骤，保证失败后可安全重跑
+  # npm 版本不可变：已发布过的版本跳过 npm 步骤，但必须先证明本地产物与
+  # npm 上的同版本包逐字节相同，否则 GitHub Release 会挂上与 npm 不同的包。
   local npm_done="false"
-  if npm --registry "$NPM_REGISTRY" view "${NPM_PKG}@${VERSION}" version >/dev/null 2>&1; then
+  if [[ "$(npm_version_state "$VERSION")" == 'published' ]]; then
     npm_done="true"
-    printf '>> npm 上已存在 %s@%s，本次仅创建 GitHub Release\n' "$NPM_PKG" "$VERSION"
+    printf '>> npm 上已存在 %s@%s，核对产物一致性后仅创建 GitHub Release\n' "$NPM_PKG" "$VERSION"
+    check_npm_integrity "$asset"
   fi
 
   if gh release view "$GIT_TAG" >/dev/null 2>&1; then
