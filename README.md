@@ -109,8 +109,6 @@ npm run verify         # typecheck + build + test，与 CI、发布闸门同一�
 
 测试只使用本地 loopback 与模拟对象，不访问真实模型 API、不需要代理或网络。`lib/` 与 `dist/` 是构建产物，不纳入版本控制。
 
-发布走 `./deploy.sh release → build → publish`；已发布的版本不可重锁，`publish` 在 npm 已有同版本时会先核对本地产物与 npm 包的 SHA512 一致，再创建 GitHub Release。
-
 ## License
 
 MIT（含源自 elizax/dsh-http-proxy 的 MIT 衍生部分，见 LICENSE）
