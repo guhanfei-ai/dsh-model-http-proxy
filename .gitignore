@@ -4,3 +4,8 @@ dist/
 *.log
 lib/
 _tacp
+# AI 协作入口只留本地，不进 Git
+AGENTS.md
+
+# TARC/TACP 本地记录目录
+_tarc/
