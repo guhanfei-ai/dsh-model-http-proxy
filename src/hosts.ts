@@ -16,9 +16,11 @@ export const DEFAULT_DEEPSEEK_HOST = 'api.deepseek.com'
 /**
  * The endpoint each pi-ai catalog route uses when its profile names no
  * `baseURL` of its own. Mirrors the routes of the installed pi-ai catalog;
- * routes whose endpoint is built per request (Bedrock, Azure, Vertex, the
- * Cloudflare gateways, opencode, typesafe) carry no entry here and are covered
- * by {@link DEFAULT_MODEL_HOST_SUFFIXES} instead.
+ * routes whose endpoint is built per request (Bedrock, Azure, Vertex) and the
+ * Cloudflare gateways are covered by {@link EXTRA_MODEL_HOSTS} and
+ * {@link DEFAULT_MODEL_HOST_SUFFIXES} instead. A built-in route with a fixed
+ * endpoint must still be listed here even when its profile has no `baseURL`,
+ * or the settings suggestions cannot name its domain.
  */
 export const PROVIDER_ENDPOINTS: Readonly<Record<string, string>> = {
   'ant-ling': 'https://api.ant-ling.com/v1',
@@ -45,11 +47,18 @@ export const PROVIDER_ENDPOINTS: Readonly<Record<string, string>> = {
   nvidia: 'https://integrate.api.nvidia.com/v1',
   openai: 'https://api.openai.com/v1',
   'openai-codex': 'https://chatgpt.com/backend-api',
+  // OpenCode profiles carry no baseURL: pi-ai attaches these per-model. Both
+  // routes share the opencode.ai host, and without these rows a newly added
+  // OpenCode provider never appears in the domain suggestions.
+  opencode: 'https://opencode.ai/inference',
+  'opencode-go': 'https://opencode.ai/inference/go',
   openrouter: 'https://openrouter.ai/api/v1',
   'qwen-token-plan': 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
   'qwen-token-plan-cn': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
   'qwen-token-plan-individual': 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  radius: 'https://radius.pi.dev/v1',
   together: 'https://api.together.ai/v1',
+  typesafe: 'https://api.typesafe.ai/v1/',
   'vercel-ai-gateway': 'https://ai-gateway.vercel.sh',
   xai: 'https://api.x.ai/v1',
   xiaomi: 'https://api.xiaomimimo.com/v1',

@@ -138,11 +138,18 @@ describe('client bundle', () => {
         'openai-codex': { displayName: 'Codex 订阅' },
         openai: { baseURL: 'https://gateway.example.com/v1', displayName: 'Gateway A' },
         anthropic: { baseURL: 'https://gateway.example.com/anthropic' },
+        // Catalog routes with no profile baseURL: the endpoint is built in.
+        opencode: {},
+        'opencode-go': {},
         unused: { baseURL: 'https://not-selectable.example.com/v1' },
       }),
       session: { modelCatalog: async () => ({ ok: true, value: {
-        routableProviders: ['openai-codex', 'openai', 'anthropic'],
-        groups: [{ id: 'anthropic', name: 'Gateway B', models: [] }],
+        routableProviders: ['openai-codex', 'openai', 'anthropic', 'opencode', 'opencode-go'],
+        groups: [
+          { id: 'anthropic', name: 'Gateway B', models: [] },
+          { id: 'opencode', name: 'OpenCode Zen', models: [] },
+          { id: 'opencode-go', name: 'OpenCode Go', models: [] },
+        ],
       } }) },
     })
     const snapshot = await face.read()
@@ -153,6 +160,9 @@ describe('client bundle', () => {
     const gateway = enriched.find(row => row.host === 'gateway.example.com')
     assert.equal(gateway?.kind, 'routable')
     assert.deepEqual(plain(gateway.providers), ['Gateway A', 'Gateway B'])
+    const opencode = enriched.find(row => row.host === 'opencode.ai')
+    assert.equal(opencode?.kind, 'routable', 'a catalog route without a profile baseURL still resolves its fixed endpoint')
+    assert.deepEqual(plain(opencode.providers), ['OpenCode Zen', 'OpenCode Go'])
     assert.ok(enriched.every(row => row.kind !== 'configured'))
     assert.ok(!enriched.some(row => row.host === 'not-selectable.example.com'))
     assertBuiltinSuggestions(enriched)
