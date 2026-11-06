@@ -99,9 +99,9 @@ describe('author builtin rules', () => {
 })
 
 describe('missing fields versus explicit stored routing', () => {
-  it('creates exactly one disabled legacy 代理1 and no automatic 代理2 for a fresh document', () => {
+  it('creates exactly one disabled legacy 代理01 and no automatic 代理02 for a fresh document', () => {
     const expected = {
-      proxies: [{ id: 'legacy', name: '代理1', enabled: false, proxy: '', proxyHosts }],
+      proxies: [{ id: 'legacy', name: '代理01', enabled: false, proxy: '', proxyHosts }],
       excludeHosts: directHosts,
     }
     assert.deepEqual(routingFieldsOf({}), expected)
@@ -124,7 +124,7 @@ describe('missing fields versus explicit stored routing', () => {
       { proxy: proxyUrl, proxyHosts: [], excludeHosts: [] },
       { proxy: proxyUrl, proxyHosts: ['auth.openai.com'], excludeHosts: ['api.deepseek.com'] },
       { proxies: [], excludeHosts: [] },
-      { proxies: [{ id: 'saved', name: '代理2', enabled: false, proxy: '', proxyHosts: [] }], excludeHosts: [] },
+      { proxies: [{ id: 'saved', name: '代理02', enabled: false, proxy: '', proxyHosts: [] }], excludeHosts: [] },
     ]) {
       assert.deepEqual(routingFieldsOf(resolvedFields(value)), routingFieldsOf(value), JSON.stringify(value))
     }
@@ -165,7 +165,7 @@ describe('missing fields versus explicit stored routing', () => {
 
   it('preserves explicit modern cards and empty card lists without reviving defaults or legacy/env values', () => {
     for (const proxies of [[], [
-      { id: 'empty', name: '代理2', enabled: true, proxy: proxyUrl, proxyHosts: [] },
+      { id: 'empty', name: '代理02', enabled: true, proxy: proxyUrl, proxyHosts: [] },
       { id: 'saved', name: 'Saved', enabled: false, proxy: '', proxyHosts: ['auth.openai.com', 'chatgpt.com'] },
     ]]) {
       const value = { proxies, excludeHosts: [], proxy: proxyUrl, proxyHosts: ['obsolete.test'] }
@@ -180,7 +180,7 @@ describe('missing fields versus explicit stored routing', () => {
     const first = routingFieldsOf({})
     first.proxies[0].proxyHosts.splice(0)
     first.excludeHosts.splice(0)
-    assert.deepEqual(first, { proxies: [{ id: 'legacy', name: '代理1', enabled: false, proxy: '', proxyHosts: [] }], excludeHosts: [] })
+    assert.deepEqual(first, { proxies: [{ id: 'legacy', name: '代理01', enabled: false, proxy: '', proxyHosts: [] }], excludeHosts: [] })
     const next = routingFieldsOf({})
     assert.deepEqual(next.proxies[0].proxyHosts, proxyHosts)
     assert.deepEqual(next.excludeHosts, directHosts)

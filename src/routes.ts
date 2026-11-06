@@ -80,7 +80,7 @@ export function routingFieldsOf(value: unknown, envProxy = ''): RoutingFields {
   return {
     proxies: [{
       id: 'legacy',
-      name: '代理1',
+      name: '代理01',
       enabled: proxy.length > 0,
       proxy,
       proxyHosts: hostList(section.proxyHosts, BUILTIN_PROXY_HOSTS, '代理域名'),

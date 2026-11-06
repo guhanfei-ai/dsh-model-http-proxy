@@ -111,7 +111,7 @@ export const DEFAULT_MODEL_HOST_SUFFIXES: readonly string[] = [
 /** Author defaults for the single global bypass list; explicit saved lists always win. */
 export const BUILTIN_DIRECT_HOSTS: readonly string[] = ['*.deepseek.com']
 
-/** The four company groups seeded into the initial 代理1 card, never new user cards. */
+/** The four company groups seeded into the initial 代理01 card, never new user cards. */
 export const BUILTIN_PROXY_GROUPS: readonly { name: string; hosts: readonly string[] }[] = [
   { name: 'OpenAI', hosts: ['*.openai.com', '*.chatgpt.com'] },
   { name: 'Anthropic', hosts: ['*.anthropic.com', '*.claude.ai', '*.claude.com'] },

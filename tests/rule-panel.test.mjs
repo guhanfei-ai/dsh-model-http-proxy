@@ -239,14 +239,14 @@ const ruleRow = (ui, id, host) => {
   return matches[0]
 }
 
-test('fresh {} has exactly one disabled 代理1 with company-labelled author rules; manually added 代理2 starts empty', async t => {
+test('fresh {} has exactly one disabled 代理01 with company-labelled author rules; manually added 代理02 starts empty', async t => {
   const ui = mounted(t, {})
   await ui.flush()
   assert.equal(ui.cards().length, 1)
-  assert.equal(ui.card('legacy').props['aria-label'], '代理1')
-  assert.equal(ui.nameInput('legacy').props.value, '代理1')
+  assert.equal(ui.card('legacy').props['aria-label'], '代理01')
+  assert.equal(ui.nameInput('legacy').props.value, '代理01')
   assert.equal(ui.urlInput('legacy').props.value, '')
-  assert.equal(ui.button('启用 代理1', ui.card('legacy')).props['aria-checked'], false)
+  assert.equal(ui.button('启用 代理01', ui.card('legacy')).props['aria-checked'], false)
   assert.deepEqual(activeRules(ui), [...BUILTIN_DIRECT_HOSTS])
   assert.deepEqual(activeRules(ui, 'legacy'), [...BUILTIN_PROXY_HOSTS])
   for (const group of builtinGroups) {
@@ -277,7 +277,7 @@ test('fresh {} has exactly one disabled 代理1 with company-labelled author rul
   await ui.click('＋ 添加代理')
   assert.equal(ui.cards().length, 2)
   const id = ui.cards().find(card => card.props['data-proxy-card'] !== 'legacy').props['data-proxy-card']
-  assert.equal(ui.nameInput(id).props.value, '代理2', 'the second card is only created by the user')
+  assert.equal(ui.nameInput(id).props.value, '代理02', 'the second card is only created by the user')
   assert.deepEqual(activeRules(ui, id), [])
   assert.deepEqual(activeRules(ui, 'legacy'), [...BUILTIN_PROXY_HOSTS])
   assert.deepEqual(activeRules(ui), [...BUILTIN_DIRECT_HOSTS])
@@ -286,8 +286,8 @@ test('fresh {} has exactly one disabled 代理1 with company-labelled author rul
   await ui.change(ui.urlInput(id), 'http://127.0.0.1:9000')
   await ui.click('保存')
   assert.deepEqual(ui.saved(), fields([
-    proxy('legacy', { name: '代理1', enabled: false, proxy: '', proxyHosts: [...BUILTIN_PROXY_HOSTS] }),
-    proxy(id, { name: '代理2', proxy: 'http://127.0.0.1:9000', proxyHosts: [] }),
+    proxy('legacy', { name: '代理01', enabled: false, proxy: '', proxyHosts: [...BUILTIN_PROXY_HOSTS] }),
+    proxy(id, { name: '代理02', proxy: 'http://127.0.0.1:9000', proxyHosts: [] }),
   ], [...BUILTIN_DIRECT_HOSTS]))
 })
 
@@ -761,12 +761,12 @@ test('deleting author rules and every card never reinserts defaults, including t
   assert.deepEqual(ui.saved().excludeHosts, [])
   await ui.click('＋ 添加代理')
   const second = ui.cards().find(card => card.props['data-proxy-card'] !== 'legacy').props['data-proxy-card']
-  assert.equal(ui.nameInput(second).props.value, '代理2')
+  assert.equal(ui.nameInput(second).props.value, '代理02')
   assert.deepEqual(activeRules(ui, second), [])
   await ui.change(ui.urlInput(second), 'http://127.0.0.1:9000')
   await ui.click('保存')
   assert.deepEqual(ui.saved().proxies.map(entry => entry.proxyHosts), [[], []])
-  for (const [id, name] of [['legacy', '代理1'], [second, '代理2']]) {
+  for (const [id, name] of [['legacy', '代理01'], [second, '代理02']]) {
     await ui.click(`删除代理 ${name}`, ui.card(id))
     await ui.click('确认删除', ui.card(id))
   }
@@ -777,7 +777,7 @@ test('deleting author rules and every card never reinserts defaults, including t
   await ui.click('＋ 添加代理')
   const next = ui.cards()[0].props['data-proxy-card']
   assert.notEqual(next, 'legacy', 'a manually created card never re-enters legacy initialization')
-  assert.equal(ui.nameInput(next).props.value, '代理1')
+  assert.equal(ui.nameInput(next).props.value, '代理01')
   assert.deepEqual(activeRules(ui, next), [], 'even adding the first card to an empty document uses no inferred rules')
   assert.deepEqual(activeRules(ui), [], 'deleted direct defaults are not restored either')
   await ui.change(ui.urlInput(next), 'http://127.0.0.1:9001')
@@ -794,7 +794,7 @@ test('global section appears once before proxy cards; legacy rules retain source
   assert.ok(headings.indexOf('全局直连域名') < headings.findIndex(label => label.startsWith('代理配置')))
   assert.ok(headings.indexOf('全局直连域名') < headings.indexOf('代理域名'))
   assert.equal(ui.cards().length, 1)
-  assert.equal(ui.card('legacy').props['aria-label'], '代理1')
+  assert.equal(ui.card('legacy').props['aria-label'], '代理01')
   assert.match(ui.text(ruleRow(ui, 'legacy', 'auth.openai.com')), /来源：\s*自定义·已保存/u)
   assert.doesNotMatch(ui.text(ruleRow(ui, 'legacy', 'auth.openai.com')), /内置/u)
   assert.match(ui.text(), /不关闭系统代理、VPN 或 TUN/u)

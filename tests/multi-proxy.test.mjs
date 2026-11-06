@@ -59,7 +59,7 @@ class HostDispatcher extends Dispatcher {
 describe('shared multi-proxy migration', () => {
   it('migrates stable identity, env fallback, and defaults only for missing legacy hosts', () => {
     assert.deepEqual(routingFieldsOf({ proxy: 'http://saved:7890', excludeHosts: ['local.test'] }, 'http://env:7890'), {
-      proxies: [{ id: 'legacy', name: '代理1', enabled: true, proxy: 'http://saved:7890', proxyHosts: [...BUILTIN_PROXY_HOSTS] }],
+      proxies: [{ id: 'legacy', name: '代理01', enabled: true, proxy: 'http://saved:7890', proxyHosts: [...BUILTIN_PROXY_HOSTS] }],
       excludeHosts: ['local.test'],
     })
     assert.equal(routingFieldsOf({ proxy: '' }, 'http://env:7890').proxies[0].proxy, 'http://env:7890')

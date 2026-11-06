@@ -31,12 +31,15 @@ function rememberSaved(fields: ProxyFields, saved: Set<string>): void {
 
 /** A stable, document-local identity, unrelated to the card's display name or position. */
 function newProxy(fields: ProxyFields): ProxyEntry {
+  // Names carry the same two-digit index the card shows on its left, so the
+  // default 代理01/代理02 label matches the visible 01/02 badge.
+  const label = (n: number): string => `代理${String(n).padStart(2, '0')}`
   let number = 1
-  while (fields.proxies.some(entry => entry.name === `代理${number}`)) number++
+  while (fields.proxies.some(entry => entry.name === label(number))) number++
   let id: string
   do { id = `proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}` }
   while (fields.proxies.some(entry => entry.id === id))
-  return { id, name: `代理${number}`, enabled: true, proxy: '', proxyHosts: [] }
+  return { id, name: label(number), enabled: true, proxy: '', proxyHosts: [] }
 }
 
 export function ModelProxyPage(props: ModelProxyPageProps) {
@@ -326,7 +329,7 @@ export function ModelProxyPage(props: ModelProxyPageProps) {
     </section>
 
     <section className={css.routePreview} aria-labelledby="model-proxy-preview">
-      <h2 className={css.sectionTitle} id="model-proxy-preview">路由预览 <span className={css.count}>{previewRows.length}</span></h2>
+      <h2 className={css.sectionTitle} id="model-proxy-preview">路由预览</h2>
       <p className={css.hint}>
         按当前草稿计算，保存后生效；未列出的域名走本机默认网络。
         只列模型目录与已保存的域名，且仅当请求经过全局 fetch 时本插件才生效（见 README「覆盖边界」）。

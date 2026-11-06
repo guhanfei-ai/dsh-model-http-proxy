@@ -117,7 +117,7 @@ describe('client bundle', () => {
     })
     // No timeout needs to fire, and no catalog call is made, to read settings.
     const snapshot = await withinDeadline(face.read(), 'read() blocked on the model catalog')
-    assert.deepEqual(plain(snapshot.proxies), [proxy('legacy', { name: '代理1', enabled: false, proxy: '', proxyHosts: ['api.openai.com'] })])
+    assert.deepEqual(plain(snapshot.proxies), [proxy('legacy', { name: '代理01', enabled: false, proxy: '', proxyHosts: ['api.openai.com'] })])
     assert.equal(catalogCalls, 0)
     assert.ok(snapshot.suggestions.length > 0)
     assert.ok(snapshot.suggestions.every(row => row.kind !== 'routable'))
@@ -246,7 +246,7 @@ describe('client bundle', () => {
     }
     assert.deepEqual(plain(snapshot), before, 'catalog enrichment must not mutate the read snapshot')
     assert.deepEqual(plain(snapshot.proxies), [proxy('legacy', {
-      name: '代理1', enabled: false, proxy: '', proxyHosts: [...BUILTIN_PROXY_HOSTS],
+      name: '代理01', enabled: false, proxy: '', proxyHosts: [...BUILTIN_PROXY_HOSTS],
     })])
     assert.deepEqual(plain(snapshot.excludeHosts), [...BUILTIN_DIRECT_HOSTS])
     assert.deepEqual(value, {}, 'merely reading does not persist schema/default migration')
@@ -293,12 +293,12 @@ describe('client bundle', () => {
       assert.equal(first.proxies.length, 1)
       assert.equal(first.proxies[0].id, 'legacy')
       assert.equal(first.proxies[0].id, second.proxies[0].id)
-      assert.equal(first.proxies[0].name, '代理1')
+      assert.equal(first.proxies[0].name, '代理01')
       assert.equal(first.proxies[0].enabled, enabled)
       assert.deepEqual(plain(first.proxies[0].proxyHosts), hosts)
       assert.deepEqual(plain(first.excludeHosts), value.excludeHosts ?? [...BUILTIN_DIRECT_HOSTS])
       assertBuiltinSuggestions(first.suggestions)
-      assert.equal(first.proxies.some(entry => entry.name === '代理2'), false, 'migration never adds a second default card')
+      assert.equal(first.proxies.some(entry => entry.name === '代理02'), false, 'migration never adds a second default card')
       assert.deepEqual(value, before, 'read never writes the migration back')
       assert.equal(writes.length, 0)
     }
@@ -332,7 +332,7 @@ describe('client bundle', () => {
     assert.deepEqual(plain((await face.read()).proxies[0].proxyHosts), [])
     assert.equal(value.proxy, '')
     assert.deepEqual(value.proxyHosts, [])
-    await face.save(fields([proxy('legacy', { name: '代理1', proxyHosts: ['*.openai.com'] })], ['api.openai.com']))
+    await face.save(fields([proxy('legacy', { name: '代理01', proxyHosts: ['*.openai.com'] })], ['api.openai.com']))
     const overlap = await face.read()
     assert.deepEqual(plain(overlap.proxies[0].proxyHosts), ['*.openai.com'])
     assert.deepEqual(plain(overlap.excludeHosts), ['api.openai.com'])
