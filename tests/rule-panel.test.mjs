@@ -1354,3 +1354,35 @@ test('unmount cleanup ignores a pending settings read and catalog enrichment', a
   await second.flush()
   assert.equal(second.nodes().length, 0)
 })
+
+const previewSection = ui => {
+  const matches = ui.nodes().filter(node => node.type === 'section' && node.props['aria-labelledby'] === 'model-proxy-preview')
+  assert.equal(matches.length, 1, 'one route preview section')
+  return matches[0]
+}
+const previewRow = (ui, host) => {
+  const rows = ui.nodes(previewSection(ui)).filter(node => node.type === 'li')
+  const matches = rows.filter(node => ui.text(node).includes(host))
+  assert.equal(matches.length, 1, `one preview row for ${host}`)
+  return matches[0]
+}
+
+test('route preview resolves each concrete catalog host against the current draft', async t => {
+  const rows = [
+    { host: 'api.openai.com', kind: 'routable', providers: ['OpenAI'] },
+    { host: 'api.deepseek.com', kind: 'routable', providers: ['DeepSeek'] },
+    { host: 'api.anthropic.com', kind: 'routable', providers: ['Anthropic'] },
+  ]
+  const ui = mounted(t, fields([proxy('a', { name: 'Alpha', proxyHosts: ['api.openai.com'] })], ['api.deepseek.com']), {
+    refresh: () => rows,
+    read: snapshot => ({ ...snapshot, suggestions: rows }),
+  })
+  await ui.flush()
+  assert.ok(ui.text(previewRow(ui, 'api.openai.com')).includes('→ Alpha'), 'a proxied host names the card that owns it')
+  assert.ok(ui.text(previewRow(ui, 'api.deepseek.com')).includes('直连'), 'an excluded host reports direct')
+  assert.ok(ui.text(previewRow(ui, 'api.anthropic.com')).includes('默认网络'), 'an unmatched host reports the default network')
+  const summary = ui.text(previewSection(ui))
+  assert.match(summary, /代理\s+1/u)
+  assert.match(summary, /直连\s+1/u)
+  assert.match(summary, /默认网络\s+1/u)
+})

@@ -4,7 +4,8 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { HostSuggestion, ProxyFace, ProxyFields } from './settings-io.js'
 import { cloneProxyFields, isBackendReloadRequired, isSettingsConflict, rebaseRoutingFields, sameProxyFields } from './settings-io.js'
 import { normalizeHostEntry } from '../hosts.js'
-import { proxyConflicts, routingFieldsOf } from '../routes.js'
+import { hostMatches } from '../hosts.js'
+import { proxyConflicts, routingFieldsOf, selectProxy } from '../routes.js'
 import type { ProxyEntry } from '../routes.js'
 import { configProblem } from '../validate.js'
 import { ValueField, HostField } from './fields.js'
@@ -161,6 +162,27 @@ export function ModelProxyPage(props: ModelProxyPageProps) {
   const conflicts = proxyConflicts(draft)
   const activeHosts = draft.proxies.filter(entry => entry.enabled).flatMap(entry => entry.proxyHosts)
 
+  // Preview what the CURRENT DRAFT does to every known model host: the same
+  // selectProxy the host half uses, so the page can never show a different
+  // answer than the router. Wildcard rules are skipped as rows (they are not
+  // hostnames); they still apply to matching requests.
+  const previewRows = suggestions
+    .filter(option => !option.host.includes('*'))
+    .map(option => {
+      const direct = draft.excludeHosts.some(rule => hostMatches(option.host, rule))
+      const card = direct ? undefined : selectProxy(option.host, draft)
+      return {
+        host: option.host,
+        providers: option.providers,
+        kind: direct ? 'direct' as const : card !== undefined ? 'proxy' as const : 'default' as const,
+        cardName: card?.name ?? '',
+      }
+    })
+  const previewProxied = previewRows.filter(row => row.kind === 'proxy')
+  const previewDirect = previewRows.filter(row => row.kind === 'direct')
+  const previewDefault = previewRows.filter(row => row.kind === 'default')
+  const previewShown = [...previewProxied, ...previewDirect, ...previewDefault].slice(0, 12)
+
   function change(next: ProxyFields): void {
     setDraft(next)
     setNotice('')
@@ -301,6 +323,33 @@ export function ModelProxyPage(props: ModelProxyPageProps) {
           <p>尚未配置代理</p><p className={css.hint}>所有请求使用本机默认网络。点击「添加代理」开始配置。</p>
         </div> : null}
       </div>
+    </section>
+
+    <section className={css.routePreview} aria-labelledby="model-proxy-preview">
+      <h2 className={css.sectionTitle} id="model-proxy-preview">路由预览 <span className={css.count}>{previewRows.length}</span></h2>
+      <p className={css.hint}>
+        按当前草稿计算，保存后生效；未列出的域名走本机默认网络。
+        只列模型目录与已保存的域名，且仅当请求经过全局 fetch 时本插件才生效（见 README「覆盖边界」）。
+      </p>
+      <div className={css.routeSummary} role="status">
+        <span className={css.routeBadge}>代理 {previewProxied.length}</span>
+        <span className={css.routeBadge}>直连 {previewDirect.length}</span>
+        <span className={css.routeBadge}>默认网络 {previewDefault.length}</span>
+      </div>
+      <ul className={css.routeList}>
+        {previewShown.map(row => <li className={css.routeRow} key={row.host}>
+          <span className={css.routeHost}>
+            {row.host}
+            {row.providers.length > 0 ? <span className={css.routeProviders}>{row.providers.join('、')}</span> : null}
+          </span>
+          <span className={row.kind === 'proxy' ? `${css.routeKind} ${css.routeKindProxy}` : css.routeKind}>
+            {row.kind === 'proxy' ? `→ ${row.cardName}` : row.kind === 'direct' ? '直连' : '默认网络'}
+          </span>
+        </li>)}
+      </ul>
+      {previewRows.length > previewShown.length
+        ? <p className={css.hint}>其余 {previewRows.length - previewShown.length} 个域名未展开。</p>
+        : null}
     </section>
 
     <div className={css.footer}>

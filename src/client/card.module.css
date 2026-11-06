@@ -736,3 +736,47 @@
 @media (prefers-reduced-motion: reduce) {
   .toggleTrack, .toggleTrack > span, .hostPickerChevron { transition: none; }
 }
+.routePreview {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+  box-sizing: border-box;
+}
+.routeSummary { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+.routeBadge {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+.routeList { margin: 4px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--dsw-alias-border-l2); }
+.routeRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  min-width: 0;
+}
+.routeRow:last-child { border-bottom: 0; }
+.routeHost {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+.routeProviders { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.routeKind {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+.routeKindProxy { color: var(--dsw-alias-state-success-primary); }
